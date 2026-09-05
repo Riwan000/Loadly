@@ -81,25 +81,25 @@ def get_embeddings(texts: List[str], model: str = "openai/text-embedding-3-small
         "Content-Type": "application/json",
         "HTTP-Referer": "https://electricity-demand-forecaster.streamlit.app",
         "X-Title": "Smart Energy Forecasting Platform"
-    }
+    } # Becomes {"Authorization": "Bearer <API_KEY>", "Content-Type": "application/json", ...} for OpenRouter API headers.
     
     payload = {
         "model": model,
         "input": texts
-    }
+    } # Becomes {"model": "openai/text-embedding-3-small", "input": ["text1", "text2", ...]} for OpenRouter API input format.
     
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
         
-        data = response.json()
+        data = response.json() # Parse JSON response into a Python dictionary
         
         if "data" not in data:
             raise ValueError(f"Unexpected API response format: {data}")
         
         embedding_items = data["data"]
         if all("index" in item for item in embedding_items):
-            embedding_items = sorted(embedding_items, key=lambda x: x.get("index", 0))
+            embedding_items = sorted(embedding_items, key=lambda x: x.get("index", 0)) # To make sure embeddings are in the same order as input texts
         
         embeddings = [item["embedding"] for item in embedding_items]
         return np.array(embeddings)
@@ -126,7 +126,7 @@ def get_embeddings(texts: List[str], model: str = "openai/text-embedding-3-small
         raise ValueError(f"Error parsing embeddings response: {str(e)}")
 
 
-@lru_cache(maxsize=100)
+@lru_cache(maxsize=100) # Cache up to 100 unique text embeddings. Suitable for frequently accessed knowledge base documents. LRU cache is in-memory and will be cleared when the process exits. For persistent caching, consider using a database or file-based cache.
 def get_embedding_cached(text: str, model: str = "openai/text-embedding-3-small") -> np.ndarray:
     """
     Get embedding for a single text with caching.

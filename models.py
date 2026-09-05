@@ -4,25 +4,42 @@
 import os
 import pickle
 import json
-import streamlit as st
+import logging
+from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 
-@st.cache_data
+def _is_streamlit_running():
+    try:
+        from streamlit.runtime import exists as st_exists
+        return st_exists()
+    except Exception:
+        return False
+
+
+def cache_model_data(func):
+    """Decorator that uses Streamlit cache if running in Streamlit, else lru_cache."""
+    if _is_streamlit_running():
+        import streamlit as st
+        return st.cache_data(func)
+    return lru_cache(maxsize=4)(func)
+
+
+@cache_model_data
 def load_model():
     """
-    Load the trained XGBoost model from pickle file.
-
-    Uses Streamlit's cache_data decorator to load the model only once
-    and reuse it across reruns, improving performance.
+    Load the trained forecasting model (Reduced_LR best_model.pkl or fallback).
 
     Returns:
-        model: Trained XGBoost model object or None if file not found
+        model: Trained model object or None if file not found
     """
     possible_paths = [
+        'artifacts/best_model.pkl',
+        'best_model.pkl',
+        '../artifacts/best_model.pkl',
         'artifacts/xgb2_model.pkl',
-        'xgb2_model.pkl',
-        '../xgb2_model.pkl',
-        '../models/xgb2_model.pkl'
+        'xgb2_model.pkl'
     ]
 
     for model_path in possible_paths:
@@ -32,14 +49,21 @@ def load_model():
                     model = pickle.load(f)
                 return model
             except Exception as e:
-                st.error(f"Error loading model from {model_path}: {str(e)}")
+                logger.error(f"Error loading model from {model_path}: {str(e)}")
+                if _is_streamlit_running():
+                    import streamlit as st
+                    st.error(f"Error loading model from {model_path}: {str(e)}")
                 continue
 
-    st.error("Model file not found. Please check the model path.")
+    msg = "Model file not found. Please check artifacts/best_model.pkl path."
+    logger.error(msg)
+    if _is_streamlit_running():
+        import streamlit as st
+        st.error(msg)
     return None
 
 
-@st.cache_data
+@cache_model_data
 def load_model_metadata():
     """
     Load model metadata including state-wise RMSE values.
@@ -50,6 +74,7 @@ def load_model_metadata():
     possible_paths = [
         'artifacts/model_metadata.json',
         'model_metadata.json',
+        '../artifacts/model_metadata.json',
         '../model_metadata.json',
         './model_metadata.json'
     ]
@@ -61,7 +86,7 @@ def load_model_metadata():
                     metadata = json.load(f)
                 return metadata
             except Exception as e:
-                st.warning(f"Error loading metadata from {metadata_path}: {str(e)}")
+                logger.warning(f"Error loading metadata from {metadata_path}: {str(e)}")
                 continue
 
     return None

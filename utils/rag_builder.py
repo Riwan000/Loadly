@@ -142,16 +142,16 @@ def build_feature_importance_documents(feature_importance: Dict, top_n: int = 10
         'text': top_features_text,
         'metadata': {
             'type': 'feature_importance',
-            'top_n': top_n,
-            'features': [f[0] for f in sorted_features]
+            'top_n': int(top_n),
+            'features': [str(f[0]) for f in sorted_features]
         }
     })
     
     # Create individual documents for top 5 features
     for i, (feature, importance) in enumerate(sorted_features[:5], 1):
-        category = categorize_feature_simple(feature)
+        category = categorize_feature_simple(str(feature))
         feature_text = (
-            f"Feature: {feature} is a {category} feature with importance score of {importance:.4f}, "
+            f"Feature: {feature} is a {category} feature with importance score of {float(importance):.4f}, "
             f"making it one of the top {i} most important features for electricity demand forecasting. "
             f"This feature significantly influences the model's predictions."
         )
@@ -159,10 +159,10 @@ def build_feature_importance_documents(feature_importance: Dict, top_n: int = 10
             'text': feature_text,
             'metadata': {
                 'type': 'feature_importance',
-                'feature': feature,
-                'importance': importance,
+                'feature': str(feature),
+                'importance': float(importance),
                 'category': category,
-                'rank': i
+                'rank': int(i)
             }
         })
     

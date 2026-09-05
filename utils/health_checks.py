@@ -13,18 +13,18 @@ import os
 
 def check_model() -> Tuple[bool, str]:
     """
-    Verify XGBoost model file exists and is readable.
+    Verify model file exists and is readable.
 
     Returns:
         (healthy: bool, reason: str)
-
-    Examples:
-        (True, "Model file found")
-        (False, "Model file not found")
     """
     possible_paths = [
+        'artifacts/best_model.pkl',
+        'best_model.pkl',
         'artifacts/xgb2_model.pkl',
         'xgb2_model.pkl',
+        '../artifacts/best_model.pkl',
+        '../best_model.pkl',
         '../xgb2_model.pkl',
         '../models/xgb2_model.pkl'
     ]

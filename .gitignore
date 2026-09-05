@@ -8,3 +8,9 @@ memory/
 review/
 CLAUDE.md
 logs/
+utils/self_embeddings.py
+node_modules/
+frontend/node_modules/
+.coverage
+htmlcov/
+coverage.xml

@@ -5,12 +5,22 @@ on:
     branches: [ main ]
     paths:
       - 'app.py'
+      - 'server.py'
       - 'requirements.txt'
+      - 'requirements-test.txt'
       - 'features.py'
       - 'weather.py'
       - 'models.py'
+      - 'data_loading.py'
+      - 'visualization.py'
+      - 'rag.py'
+      - 'api/**'
+      - 'frontend/**'
       - 'ui/**'
       - 'utils/**'
+      - 'artifacts/**'
+      - 'Dockerfile'
+      - '.dockerignore'
       - '.github/workflows/deploy.yml'
 
 jobs:

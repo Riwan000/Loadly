@@ -2,19 +2,53 @@
 # DATA LOADING FUNCTIONS
 # ============================================================================
 import os
+import json
+import logging
+from functools import lru_cache
 import pandas as pd
 import numpy as np
-import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 
-@st.cache_data
+def _is_streamlit_running():
+    try:
+        from streamlit.runtime import exists as st_exists
+        return st_exists()
+    except Exception:
+        return False
+
+
+def cache_data_fn(func):
+    """Decorator that uses Streamlit cache if in Streamlit, else lru_cache."""
+    if _is_streamlit_running():
+        import streamlit as st
+        return st.cache_data(func)
+    return lru_cache(maxsize=36)(func)
+
+
+def load_climatology_reference():
+    """Load precomputed climatology reference profiles."""
+    paths = [
+        'artifacts/climatology_reference.json',
+        '../artifacts/climatology_reference.json',
+        './artifacts/climatology_reference.json',
+        'climatology_reference.json'
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Error loading climatology reference from {p}: {e}")
+    return None
+
+
+@cache_data_fn
 def load_historical_data(state_name):
     """
-    Load historical weather data for a specific state from CSV files.
-
-    This function loads the historical weather data that was used to train
-    the model. It's used as a fallback when weather API fails or for
-    climatology-based forecasting.
+    Load historical weather data for a specific state from CSV files or reference json.
 
     Parameters:
         state_name (str): Name of the Indian state
@@ -73,13 +107,39 @@ def load_historical_data(state_name):
                 df['date'] = pd.to_datetime(df['date'])
                 return df
             except Exception as e:
-                st.warning(f"Error loading {file_path}: {str(e)}")
+                logger.warning(f"Error loading {file_path}: {str(e)}")
                 continue
+
+    # Fallback to precomputed climatology reference if CSV files are not on disk
+    ref = load_climatology_reference()
+    if ref and state_name in ref:
+        monthly_data = ref[state_name].get('monthly', {})
+        if monthly_data:
+            dates = pd.date_range('2023-01-01', '2023-12-31', freq='D')
+            rows = []
+            for dt in dates:
+                m_str = str(dt.month)
+                m_stats = monthly_data.get(m_str, {})
+                rows.append({
+                    'date': dt,
+                    '2m_temperature_mean': m_stats.get('2m_temperature_mean', 300.0),
+                    '2m_temperature_min': m_stats.get('2m_temperature_min', 295.0),
+                    '2m_temperature_max': m_stats.get('2m_temperature_max', 305.0),
+                    '2m_dewpoint_temperature_mean': m_stats.get('2m_dewpoint_temperature_mean', 295.0),
+                    '2m_dewpoint_temperature_min': m_stats.get('2m_dewpoint_temperature_min', 290.0),
+                    '2m_dewpoint_temperature_max': m_stats.get('2m_dewpoint_temperature_max', 300.0),
+                    '10m_u_component_of_wind_mean': m_stats.get('10m_u_component_of_wind_mean', 0.0),
+                    '10m_v_component_of_wind_mean': m_stats.get('10m_v_component_of_wind_mean', 0.0),
+                    'surface_solar_radiation_downwards_mean': m_stats.get('surface_solar_radiation_downwards_mean', 150.0),
+                    'total_cloud_cover_mean': m_stats.get('total_cloud_cover_mean', 50.0),
+                    'utci_mean': m_stats.get('utci_mean', 300.0),
+                })
+            return pd.DataFrame(rows)
 
     return None
 
 
-@st.cache_data
+@cache_data_fn
 def load_historical_demand(state_name):
     """
     Load historical actual demand data for a specific state from CSV files.
@@ -171,7 +231,7 @@ def load_historical_demand(state_name):
                     return demand_df
 
             except Exception as e:
-                st.warning(f"Error loading demand data from {file_path}: {str(e)}")
+                logger.warning(f"Error loading demand data from {file_path}: {str(e)}")
                 continue
 
     return None
@@ -182,6 +242,12 @@ def get_fallback_baseline(state_name):
     Get fallback baseline for a state when historical data is unavailable.
     These are approximate typical daily demand values in MU.
     """
+    ref = load_climatology_reference()
+    if ref and state_name in ref:
+        b = ref[state_name].get("baseline_30d_mu")
+        if b and b > 0:
+            return float(b)
+
     fallback_baselines = {
         'Maharashtra': 400.0, 'Gujarat': 250.0, 'Tamil Nadu': 300.0, 'Karnataka': 200.0,
         'Uttar Pradesh': 350.0, 'West Bengal': 200.0, 'Rajasthan': 150.0, 'Madhya Pradesh': 180.0,
@@ -196,12 +262,12 @@ def get_fallback_baseline(state_name):
     }
     baseline = fallback_baselines.get(state_name)
     if baseline is None:
-        st.warning(f"⚠️ No fallback baseline defined for '{state_name}'. Using 100 MU — forecasts will be inaccurate.")
+        logger.warning(f"No fallback baseline defined for '{state_name}'. Using 100 MU.")
         return 100.0
     return baseline
 
 
-@st.cache_data
+@cache_data_fn
 def get_state_historical_averages(state_name: str) -> dict:
     """
     Compute per-state historical averages for inference-time feature imputation.
@@ -287,32 +353,39 @@ def calculate_state_30d_baseline(historical_demand, date):
     return baseline
 
 
-def denormalize_predictions(predictions, dates, state_name, historical_demand=None):
+def denormalize_predictions(predictions, dates, state_name, historical_demand=None, is_log_scale=False):
     """
-    Convert log-space predictions to absolute MU values.
+    Process predictions from the model to absolute MU values.
 
-    Model (XGB2_Log) outputs log1p-transformed predictions. This function:
-    1. Applies expm1 to convert from log space to processed space
-    2. Multiplies by state_30d_baseline to get absolute MU values
+    For the Best Model (Reduced Linear Regression), outputs are already in absolute MU space.
+    For legacy log-transformed models (e.g. XGB2_Log), expm1 is applied.
 
     Parameters:
-        predictions (np.array): Log-space predictions from model
+        predictions (np.array or pd.Series): Model prediction outputs
         dates (pd.Series): Dates corresponding to predictions
         state_name (str): Name of the state
-        historical_demand (pd.DataFrame): Optional historical demand data for baseline calculation
+        historical_demand (pd.DataFrame, optional): Historical demand data
+        is_log_scale (bool, optional): Whether model predictions are in log1p space. Defaults to False.
 
     Returns:
-        np.array: Absolute predictions in MU
+        np.array: Absolute predictions in MU (clipped to >= 0)
     """
-    predictions_processed = np.expm1(predictions)
+    preds_arr = np.asarray(predictions, dtype=float)
+
+    if not is_log_scale:
+        # Best Model (Reduced Linear Regression) directly outputs demand in MU
+        return np.maximum(0.0, preds_arr)
+
+    # Legacy log-space conversion
+    predictions_processed = np.expm1(preds_arr)
 
     if historical_demand is None:
         historical_demand = load_historical_demand(state_name)
 
     if historical_demand is None or len(historical_demand) == 0:
         fallback_baseline = get_fallback_baseline(state_name)
-        st.caption(f"📌 Historical demand data unavailable for **{state_name}** — using reference baseline of {fallback_baseline:.0f} MU.")
-        return predictions_processed * fallback_baseline
+        logger.info(f"Historical demand data unavailable for {state_name} — using reference baseline of {fallback_baseline:.0f} MU.")
+        return np.maximum(0.0, predictions_processed)
 
     if len(dates) > 0:
         first_date = pd.Timestamp(dates.iloc[0])
@@ -325,18 +398,11 @@ def denormalize_predictions(predictions, dates, state_name, historical_demand=No
                 baseline = historical_demand['actual_demand_MU'].mean()
             else:
                 fallback_baseline = get_fallback_baseline(state_name)
-                st.caption(f"📌 Historical demand data unavailable for **{state_name}** — using reference baseline of {fallback_baseline:.0f} MU.")
-                return predictions_processed * fallback_baseline
+                logger.info(f"Historical demand data unavailable for {state_name} — using reference baseline of {fallback_baseline:.0f} MU.")
+                return np.maximum(0.0, predictions_processed)
 
-            return predictions_processed * baseline
+            return np.maximum(0.0, predictions_processed)
         else:
-            baselines = dates.apply(lambda d: calculate_state_30d_baseline(historical_demand, d))
-            if baselines.isna().any():
-                mean_baseline = baselines.mean() if baselines.notna().any() else historical_demand['actual_demand_MU'].mean()
-                baselines = baselines.fillna(mean_baseline)
-
-            return predictions_processed * baselines.values
+            return np.maximum(0.0, predictions_processed)
     else:
-        fallback_baseline = get_fallback_baseline(state_name)
-        st.caption(f"📌 Historical demand data unavailable for **{state_name}** — using reference baseline of {fallback_baseline:.0f} MU.")
-        return predictions_processed * fallback_baseline
+        return np.maximum(0.0, predictions_processed)

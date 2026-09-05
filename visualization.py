@@ -29,7 +29,7 @@ def get_feature_importance(model, top_n=15, filter_weather_only=False):
         feature_names = model.feature_names_in_
         importances = model.feature_importances_
 
-        importance_dict = dict(zip(feature_names, importances))
+        importance_dict = {str(k): float(v) for k, v in zip(feature_names, importances)}
 
         if filter_weather_only:
             weather_categories = ['Temperature', 'Humidity', 'Weather']
@@ -41,7 +41,7 @@ def get_feature_importance(model, top_n=15, filter_weather_only=False):
             importance_dict = weather_features
 
         sorted_importance = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
-        return dict(list(sorted_importance.items())[:top_n])
+        return {str(k): float(v) for k, v in list(sorted_importance.items())[:top_n]}
     except Exception:
         return None
 
@@ -427,6 +427,11 @@ def get_seasonal_comparison(state_name, current_season, historical_df=None):
     Returns:
         dict: Dictionary with seasonal statistics
     """
+    from data_loading import load_climatology_reference
+    ref = load_climatology_reference()
+    if ref and state_name in ref and ref[state_name].get("seasons"):
+        return ref[state_name]["seasons"]
+
     if historical_df is None:
         historical_df = load_historical_data(state_name)
 

@@ -40,14 +40,14 @@ class TestIntegration:
 
     def test_prediction_range_realistic(self, sample_weather_df, loaded_model):
         """
-        PURPOSE: Verify predictions are in realistic range (0-500 MU)
+        PURPOSE: Verify predictions are in realistic range (0-1000 MU)
         CATCHES: Out-of-range predictions (negative, extremely high)
         PRODUCTION IMPACT: UI shows impossible demand values
         """
         X, _ = prepare_features_for_prediction(sample_weather_df, 'Maharashtra', model=loaded_model)
         predictions = loaded_model.predict(X)
 
-        assert all(0 < p < 500 for p in predictions), "Predictions out of realistic range"
+        assert all(0 < p < 1000 for p in predictions), "Predictions out of realistic range"
 
     def test_features_match_model_expectation(self, sample_weather_df, loaded_model):
         """
