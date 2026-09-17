@@ -16,7 +16,7 @@ fastapi>=0.110.0
 uvicorn>=0.28.0
 
 # Visualization
-plotly>=5.17.0
+plotly>=6.7.0
 
 # HTTP Requests (for Weather API)
 requests>=2.31.0
