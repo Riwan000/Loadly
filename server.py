@@ -91,6 +91,27 @@ if os.path.exists(frontend_dist):
     if os.path.exists(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend_assets")
 
+    frontend_dist_real = os.path.realpath(frontend_dist)
+
+    def _resolve_dist_file(full_path: str):
+        """Return the real path of a file inside frontend/dist, or None.
+
+        full_path arrives percent-decoded, so it may contain '..', backslashes,
+        drive letters or absolute paths; anything resolving outside dist is refused.
+        """
+        if not full_path or "\\" in full_path or "\x00" in full_path:
+            return None
+        if os.path.isabs(full_path) or os.path.splitdrive(full_path)[0]:
+            return None
+        try:
+            candidate = os.path.realpath(os.path.join(frontend_dist_real, full_path))
+            root = os.path.normcase(frontend_dist_real)
+            if os.path.commonpath([root, os.path.normcase(candidate)]) != root:
+                return None
+        except ValueError:  # e.g. different drives on Windows
+            return None
+        return candidate if os.path.isfile(candidate) else None
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str, request: Request):
         if full_path.startswith("api/") or full_path in ("docs", "redoc", "openapi.json"):
@@ -107,10 +128,10 @@ if os.path.exists(frontend_dist):
                 "health_check": "/api/health"
             }
 
-        file_path = os.path.join(frontend_dist, full_path)
-        if full_path and os.path.isfile(file_path):
+        file_path = _resolve_dist_file(full_path)
+        if file_path is not None:
             return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
+        return FileResponse(os.path.join(frontend_dist_real, "index.html"))
 else:
     @app.get("/", tags=["General"])
     def root():

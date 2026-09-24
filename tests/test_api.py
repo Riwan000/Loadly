@@ -2,6 +2,9 @@
 Unit & Integration tests for FastAPI REST API endpoints.
 """
 
+import os
+from urllib.parse import quote
+
 import pytest
 from fastapi.testclient import TestClient
 from server import app
@@ -154,3 +157,96 @@ def test_assistant_chat_out_of_scope():
     data = response.json()
     assert data["is_out_of_scope"] is True
     assert "specifically designed" in data["reply"]
+
+
+# --- SPA catch-all: path traversal regression tests ---------------------------
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIST = os.path.join(PROJECT_ROOT, "frontend", "dist")
+requires_dist = pytest.mark.skipif(
+    not os.path.isfile(os.path.join(FRONTEND_DIST, "index.html")),
+    reason="frontend/dist not built",
+)
+
+
+def _index_html() -> bytes:
+    with open(os.path.join(FRONTEND_DIST, "index.html"), "rb") as f:
+        return f.read()
+
+
+def _requirements_marker() -> str:
+    """First non-comment line of requirements.txt, used to detect leakage."""
+    with open(os.path.join(PROJECT_ROOT, "requirements.txt"), encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+    pytest.skip("requirements.txt has no content to detect")
+
+
+def _assert_not_leaked(response, marker: str):
+    assert response.status_code in (200, 404)
+    assert marker not in response.text
+    if response.status_code == 200:
+        assert response.content == _index_html()
+
+
+@requires_dist
+@pytest.mark.parametrize("url", [
+    "/%2e%2e%2f%2e%2e%2f.env",
+    "/%2e%2e/%2e%2e/.env",
+    "/..%2f..%2f.env",
+    "/..%5c..%5c.env",
+    "/assets%2f..%2f..%2f..%2f.env",
+])
+def test_spa_encoded_traversal_does_not_leak_env(url):
+    """Encoded dot segments / backslashes must not escape frontend/dist."""
+    _assert_not_leaked(client.get(url), "OPENROUTER_API_KEY")
+
+
+@requires_dist
+@pytest.mark.parametrize("url", [
+    "/%2e%2e/%2e%2e/requirements.txt",
+    "/%2e%2e%2f%2e%2e%2frequirements.txt",
+    "/..%5c..%5crequirements.txt",
+])
+def test_spa_encoded_traversal_does_not_leak_requirements(url):
+    _assert_not_leaked(client.get(url), _requirements_marker())
+
+
+@requires_dist
+def test_spa_absolute_path_is_not_served():
+    """Absolute paths (drive letters on Windows, leading slash on POSIX) are refused."""
+    abs_path = os.path.join(PROJECT_ROOT, "requirements.txt").replace("\\", "/")
+    marker = _requirements_marker()
+    _assert_not_leaked(client.get("/" + quote(abs_path, safe="")), marker)
+    _assert_not_leaked(client.get("/" + quote(abs_path, safe="/:")), marker)
+    backslashed = os.path.join(PROJECT_ROOT, "requirements.txt").replace("/", "\\")
+    _assert_not_leaked(client.get("/" + quote(backslashed, safe="")), marker)
+
+
+@requires_dist
+def test_spa_serves_legitimate_dist_file():
+    candidates = [
+        name for name in os.listdir(FRONTEND_DIST)
+        if name != "index.html" and os.path.isfile(os.path.join(FRONTEND_DIST, name))
+    ]
+    if not candidates:
+        pytest.skip("no static files besides index.html in frontend/dist")
+    name = candidates[0]
+    response = client.get(f"/{name}")
+    assert response.status_code == 200
+    with open(os.path.join(FRONTEND_DIST, name), "rb") as f:
+        assert response.content == f.read()
+
+
+@requires_dist
+def test_spa_unknown_route_returns_index_html():
+    response = client.get("/some/unknown/client-route", headers={"accept": "text/html"})
+    assert response.status_code == 200
+    assert response.content == _index_html()
+
+
+@requires_dist
+def test_spa_does_not_shadow_api_404():
+    assert client.get("/api/does-not-exist").status_code == 404
