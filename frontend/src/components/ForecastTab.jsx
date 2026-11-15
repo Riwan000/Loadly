@@ -176,7 +176,7 @@ export default function ForecastTab({
               <>
                 <Globe className="w-5 h-5 text-executive-navy dark:text-executive-cyan" />
                 <h2 className="text-xl font-black tracking-tight text-executive-textLight dark:text-executive-textDark">
-                  ⚡ All-India National Grid
+                  All-India National Grid
                 </h2>
                 <span className="text-xs px-2.5 py-0.5 rounded-none font-semibold bg-executive-navy/10 dark:bg-executive-cyan/20 text-executive-navy dark:text-executive-cyan border border-executive-navy/20 dark:border-executive-cyan/30">
                   National Aggregate • {horizonDays}-Day Outlook
@@ -772,7 +772,7 @@ function CustomTooltip({ active, payload, label }) {
 
         {data.is_holiday === 1 && (
           <div className="pt-1 text-[11px] text-purple-600 dark:text-purple-400 font-medium">
-            🎉 Calendar Holiday
+            Calendar Holiday
           </div>
         )}
       </div>

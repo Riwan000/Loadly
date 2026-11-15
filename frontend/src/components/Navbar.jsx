@@ -102,7 +102,7 @@ export default function Navbar({
                   className="h-full bg-transparent border-none text-executive-textLight dark:text-executive-textDark focus:outline-none cursor-pointer pr-1 text-xs font-semibold whitespace-nowrap"
                 >
                   <option value="All-India" className="bg-white dark:bg-slate-900 text-executive-navy dark:text-executive-cyan font-bold">
-                    ⚡ All-India (National Total)
+                    All-India (National Total)
                   </option>
                   {Object.entries(groupedStates).map(([regionKey, stateItems]) => (
                     <optgroup key={regionKey} label={REGION_LABELS[regionKey] || regionKey.toUpperCase()}>
