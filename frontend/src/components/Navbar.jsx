@@ -8,7 +8,8 @@ import {
   ChevronDown,
   LineChart,
   Flame,
-  Bot
+  Bot,
+  Database
 } from 'lucide-react';
 
 const REGION_LABELS = {
@@ -32,7 +33,8 @@ export default function Navbar({
   onToggleTheme,
   activeTab,
   onSelectTab,
-  onOpenHealthModal
+  onOpenHealthModal,
+  onOpenLedgerModal
 }) {
   // Group states by region
   const groupedStates = React.useMemo(() => {
@@ -138,6 +140,16 @@ export default function Navbar({
             >
               <CloudSun className={`w-3.5 h-3.5 ${useWeatherApi ? 'text-amber-500 dark:text-amber-400 animate-pulse' : ''}`} />
               <span className="hidden lg:inline">{useWeatherApi ? 'Live Weather' : 'Climatology'}</span>
+            </button>
+
+            {/* Audit Ledger & Verification Button */}
+            <button
+              onClick={onOpenLedgerModal}
+              title="Click to view Prediction Ledger & Verification Audit"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-none text-xs font-medium border border-executive-navy/30 dark:border-executive-cyan/40 bg-executive-navy/5 dark:bg-executive-cyan/10 text-executive-navy dark:text-executive-cyan hover:bg-executive-navy/10 dark:hover:bg-executive-cyan/20 transition-all"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Ledger</span>
             </button>
 
             {/* Health Status Pill */}

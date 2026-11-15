@@ -4,6 +4,7 @@ import ForecastTab from './components/ForecastTab';
 import WeatherImpactTab from './components/WeatherImpactTab';
 import AssistantTab from './components/AssistantTab';
 import SystemHealthModal from './components/SystemHealthModal';
+import LedgerModal from './components/LedgerModal';
 import ElectricityTowerBg from './components/ElectricityTowerBg';
 import { api } from './services/api';
 import { Zap, ShieldCheck } from 'lucide-react';
@@ -37,6 +38,7 @@ export default function App() {
   const [health, setHealth] = useState(null);
   const [metadata, setMetadata] = useState(null);
   const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
+  const [isLedgerModalOpen, setIsLedgerModalOpen] = useState(false);
 
   const [forecastData, setForecastData] = useState(null);
   const [forecastLoading, setForecastLoading] = useState(true);
@@ -123,6 +125,7 @@ export default function App() {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         onOpenHealthModal={() => setIsHealthModalOpen(true)}
+        onOpenLedgerModal={() => setIsLedgerModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -168,6 +171,13 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <button 
+              onClick={() => setIsLedgerModalOpen(true)} 
+              className="hover:underline flex items-center gap-1 text-executive-navy dark:text-executive-cyan font-semibold"
+            >
+              <Zap className="w-3.5 h-3.5" /> Verification Ledger
+            </button>
+            <span>•</span>
+            <button 
               onClick={() => setIsHealthModalOpen(true)} 
               className="hover:underline flex items-center gap-1"
             >
@@ -185,6 +195,13 @@ export default function App() {
         onClose={() => setIsHealthModalOpen(false)}
         health={health}
         metadata={metadata}
+      />
+
+      {/* Prediction Ledger & Verification Audit Modal */}
+      <LedgerModal
+        isOpen={isLedgerModalOpen}
+        onClose={() => setIsLedgerModalOpen(false)}
+        selectedState={selectedState}
       />
 
     </div>

@@ -157,3 +157,61 @@ class HealthResponse(BaseModel):
     status: str
     components: Dict[str, Any]
     last_error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Prediction Ledger & Verification
+# ---------------------------------------------------------------------------
+class LedgerRecordItem(BaseModel):
+    id: int
+    forecast_id: str
+    created_at: str
+    state: str
+    target_date: str
+    horizon_step: int
+    model_name: str
+    predicted_demand_mu: float
+    lower_bound_mu: Optional[float] = None
+    upper_bound_mu: Optional[float] = None
+    temperature_mean_c: Optional[float] = None
+    cdd: Optional[float] = None
+    extreme_heat: int = 0
+    actual_demand_mu: Optional[float] = None
+    reconciled_at: Optional[str] = None
+    error_mu: Optional[float] = None
+    abs_error_mu: Optional[float] = None
+    pct_error: Optional[float] = None
+    within_ci: Optional[bool] = None
+
+
+class LedgerRecordsResponse(BaseModel):
+    records: List[LedgerRecordItem]
+    total_count: int
+
+
+class VerificationMetricsResponse(BaseModel):
+    state: Optional[str] = None
+    days_window: int = 30
+    total_predictions_logged: int
+    reconciled_count: int
+    mae_mu: Optional[float] = None
+    rmse_mu: Optional[float] = None
+    mape_pct: Optional[float] = None
+    mean_bias_mu: Optional[float] = None
+    ci_coverage_pct: Optional[float] = None
+
+
+class ActualDemandIngestItem(BaseModel):
+    state: str
+    target_date: str
+    actual_demand_mu: float
+
+
+class ActualDemandIngestRequest(BaseModel):
+    records: List[ActualDemandIngestItem]
+
+
+class ActualDemandIngestResponse(BaseModel):
+    reconciled_count: int
+    status: str = "success"
+

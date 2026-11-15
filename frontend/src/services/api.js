@@ -99,5 +99,32 @@ export const api = {
   async getHealth() {
     const res = await fetch(`${API_BASE_URL}/api/health`);
     return handleResponse(res);
+  },
+
+  // Prediction Ledger & Verification
+  async getLedgerRecords({ state, limit = 50, reconciledOnly = false } = {}) {
+    const params = new URLSearchParams();
+    if (state) params.append('state', state);
+    params.append('limit', limit.toString());
+    params.append('reconciled_only', reconciledOnly.toString());
+    const res = await fetch(`${API_BASE_URL}/api/ledger/records?${params.toString()}`);
+    return handleResponse(res);
+  },
+
+  async getLedgerMetrics({ state, daysWindow = 30 } = {}) {
+    const params = new URLSearchParams();
+    if (state) params.append('state', state);
+    params.append('days_window', daysWindow.toString());
+    const res = await fetch(`${API_BASE_URL}/api/ledger/metrics?${params.toString()}`);
+    return handleResponse(res);
+  },
+
+  async ingestActuals(records) {
+    const res = await fetch(`${API_BASE_URL}/api/ledger/actuals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records })
+    });
+    return handleResponse(res);
   }
 };

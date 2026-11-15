@@ -24,6 +24,12 @@ from rag import generate_forecast_summary, initialize_rag_system
 from utils.rag_engine import is_query_in_scope, RAGEngine
 from utils.health_checks import check_model, check_rag, check_api_key
 from utils.health_monitor import HealthMonitor
+from utils.prediction_ledger import (
+    record_forecast_batch,
+    record_actuals,
+    get_verification_metrics,
+    query_ledger
+)
 
 from api.schemas import (
     StatesResponse, StateItem,
@@ -34,7 +40,10 @@ from api.schemas import (
     SeasonalComparisonResponse, SeasonStats,
     ChatRequest, ChatResponse, SourceItem,
     SuggestionsResponse,
-    HealthResponse
+    HealthResponse,
+    LedgerRecordsResponse, LedgerRecordItem,
+    VerificationMetricsResponse,
+    ActualDemandIngestRequest, ActualDemandIngestResponse
 )
 
 router = APIRouter(prefix="/api", tags=["Forecasting Platform"])
@@ -105,9 +114,9 @@ def get_model_metadata_endpoint():
     """Return model performance metrics, confidence levels, and thresholds."""
     metadata = load_model_metadata() or {}
     overall_metrics = {
-        "mae": float(metadata.get("mae", 1.10)),
-        "rmse": float(metadata.get("rmse", 2.63)),
-        "r2": float(metadata.get("r2", 0.99965))
+        key: float(metadata[key])
+        for key in ("mae", "rmse", "r2")
+        if key in metadata
     }
     raw_state_rmse = metadata.get("state_rmse", {})
     clean_state_rmse = {str(k): float(v) for k, v in raw_state_rmse.items()} if raw_state_rmse else {}
@@ -223,6 +232,14 @@ def generate_forecast_endpoint(req: ForecastRequest):
     warnings.append(
         "Generation features are set to 0.0 at inference time. Demand-based features use per-state historical averages."
     )
+
+    # Non-blocking automatic logging to Prediction Ledger
+    try:
+        model_name = str(metadata.get("model_name", "Reduced_LR")) if metadata else "Reduced_LR"
+        timeline_dicts = [t.model_dump() if hasattr(t, "model_dump") else t.dict() for t in timeline]
+        record_forecast_batch(timeline_dicts, req.state, model_name=model_name)
+    except Exception as ledger_err:
+        pass
 
     return ForecastResponse(
         state=req.state,
@@ -477,3 +494,46 @@ def get_system_health():
         components=components,
         last_error=None if overall_status == "healthy" else f"Model: {model_reason}; RAG: {rag_reason}"
     )
+
+
+# ============================================================================
+# 6. Prediction Ledger & Verification Endpoints
+# ============================================================================
+@router.get("/ledger/records", response_model=LedgerRecordsResponse)
+def get_ledger_records(
+    state: Optional[str] = Query(None, description="Filter by state name"),
+    limit: int = Query(50, ge=1, le=500, description="Max records to return"),
+    reconciled_only: bool = Query(False, description="Only return records with actuals")
+):
+    """
+    Retrieve historical forecast predictions from the audit ledger,
+    including confidence intervals, weather conditions, and reconciled actuals.
+    """
+    rows = query_ledger(state=state, limit=limit, reconciled_only=reconciled_only)
+    record_items = [LedgerRecordItem(**r) for r in rows]
+    return LedgerRecordsResponse(records=record_items, total_count=len(record_items))
+
+
+@router.get("/ledger/metrics", response_model=VerificationMetricsResponse)
+def get_ledger_verification_metrics(
+    state: Optional[str] = Query(None, description="Filter by state name"),
+    days_window: int = Query(30, ge=0, le=365, description="Lookback window in days (0 for all-time)")
+):
+    """
+    Compute real-time verification and drift metrics:
+    MAE, RMSE, MAPE (%), 90% Confidence Interval empirical coverage rate, and forecast bias.
+    """
+    metrics = get_verification_metrics(state=state, days_window=days_window)
+    return VerificationMetricsResponse(**metrics)
+
+
+@router.post("/ledger/actuals", response_model=ActualDemandIngestResponse)
+def ingest_actual_demands(req: ActualDemandIngestRequest):
+    """
+    Ingest ground-truth actual electricity demand for past dates and reconcile
+    matching forecasts in the ledger.
+    """
+    records_list = [r.model_dump() if hasattr(r, "model_dump") else r.dict() for r in req.records]
+    reconciled = record_actuals(records_list)
+    return ActualDemandIngestResponse(reconciled_count=reconciled, status="success")
+
