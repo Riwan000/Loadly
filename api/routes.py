@@ -246,6 +246,7 @@ def generate_forecast_endpoint(req: ForecastRequest):
     return ForecastResponse(
         state=req.state,
         horizon_days=req.horizon_days,
+        model_name=model_name,
         summary=summary,
         timeline=timeline,
         warnings=warnings

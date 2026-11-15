@@ -8,7 +8,7 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata })
 
   const components = [
     {
-      name: 'ML Model (XGBoost)',
+      name: `ML Model (${metadata?.model_type ? metadata.model_type.split(' ')[0] : 'Active'})`,
       ready: health?.components?.model?.ready ?? true,
       details: health?.components?.model?.details || 'Loaded and ready for inference',
       icon: Cpu,

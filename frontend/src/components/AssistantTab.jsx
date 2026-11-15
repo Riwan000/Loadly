@@ -19,7 +19,7 @@ export default function AssistantTab({ state, horizonDays }) {
     {
       id: 'welcome',
       role: 'assistant',
-      content: `Hello! I am your AI Energy Assistant grounded with domain knowledge, XGBoost model benchmarks, and weather analytics for Indian states. Ask me about electricity demand patterns, cooling load surges, extreme heat sensitivity, or model accuracy metrics.`,
+      content: `Hello! I am your AI Energy Assistant grounded with domain knowledge, machine learning model benchmarks, and weather analytics for Indian states. Ask me about electricity demand patterns, cooling load surges, extreme heat sensitivity, or model accuracy metrics.`,
       sources: []
     }
   ]);

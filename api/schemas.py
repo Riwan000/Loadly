@@ -63,6 +63,7 @@ class ForecastSummary(BaseModel):
 class ForecastResponse(BaseModel):
     state: str
     horizon_days: int
+    model_name: Optional[str] = "Reduced_LR"
     summary: ForecastSummary
     timeline: List[ForecastTimelineItem]
     warnings: List[str] = Field(default_factory=list)

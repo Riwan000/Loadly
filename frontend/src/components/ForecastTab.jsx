@@ -34,7 +34,8 @@ export default function ForecastTab({
   state,
   horizonDays,
   onChangeHorizon,
-  theme
+  theme,
+  metadata
 }) {
   const [showTable, setShowTable] = useState(true);
 
@@ -136,7 +137,7 @@ export default function ForecastTab({
             </span>
           </div>
           <p className="text-xs text-executive-mutedLight dark:text-executive-mutedDark mt-0.5">
-            XGBoost ML predictions with 90% confidence uncertainty envelopes and thermal load features
+            {forecastData?.model_name || metadata?.model_type || 'Production ML'} predictions with 90% confidence uncertainty envelopes and thermal load features
           </p>
         </div>
 

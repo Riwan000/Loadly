@@ -139,6 +139,7 @@ export default function App() {
             horizonDays={horizonDays}
             onChangeHorizon={setHorizonDays}
             theme={theme}
+            metadata={metadata}
           />
         )}
 
