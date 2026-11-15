@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-ROOT_DIR = Path(r"c:\Users\LEGION\Desktop\Projects\Electricity-Demand-Forecaster")
+ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 
 DEMAND_MU_PATH = DATA_DIR / "14983362" / "corrected_daily_energy_met_MU.csv"

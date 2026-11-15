@@ -246,7 +246,7 @@ Cards / Sidebars:  #FFFFFF (Pure White)      Cards / Sidebars:  #131C31 (Indigo 
 ## 📁 Repository Structure
 
 ```text
-Electricity-Demand-Forecaster/
+Loadly/
 ├── api/                                # FastAPI application layer
 │   ├── __init__.py                     # Package initialization
 │   ├── routes.py                       # REST route controllers & business logic
@@ -355,8 +355,8 @@ Electricity-Demand-Forecaster/
 
 ```bash
 # Clone the repository
-git clone https://github.com/Riwan000/Electricity-Demand-Forecaster.git
-cd Electricity-Demand-Forecaster
+git clone https://github.com/Riwan000/Loadly.git
+cd Loadly
 
 # Create and activate a virtual environment
 python -m venv .venv

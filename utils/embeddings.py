@@ -79,8 +79,8 @@ def get_embeddings(texts: List[str], model: str = "openai/text-embedding-3-small
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://electricity-demand-forecaster.streamlit.app",
-        "X-Title": "Smart Energy Forecasting Platform"
+        "HTTP-Referer": "https://loadly.app",
+        "X-Title": "Loadly - Smart Energy Forecasting Platform"
     } # Becomes {"Authorization": "Bearer <API_KEY>", "Content-Type": "application/json", ...} for OpenRouter API headers.
     
     payload = {

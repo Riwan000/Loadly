@@ -151,8 +151,8 @@ def call_openrouter_llm(messages: List[Dict], model: str = "nvidia/nemotron-nano
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://electricity-demand-forecaster.streamlit.app",
-        "X-Title": "Smart Energy Forecasting Platform"
+        "HTTP-Referer": "https://loadly.app",
+        "X-Title": "Loadly - Smart Energy Forecasting Platform"
     }
 
     payload = {
@@ -208,8 +208,8 @@ def stream_openrouter_llm(
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://electricity-demand-forecaster.streamlit.app",
-        "X-Title": "Smart Energy Forecasting Platform"
+        "HTTP-Referer": "https://loadly.app",
+        "X-Title": "Loadly - Smart Energy Forecasting Platform"
     }
 
     payload = {

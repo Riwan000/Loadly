@@ -49,7 +49,7 @@ jobs:
     - name: Build Docker image
       if: success()
       run: |
-        docker build -t electricity-demand-forecaster:latest .
+        docker build -t loadly:latest .
 
     - name: Push to registry
       if: success()
