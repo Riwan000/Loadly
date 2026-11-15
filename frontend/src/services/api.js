@@ -126,5 +126,17 @@ export const api = {
       body: JSON.stringify({ records })
     });
     return handleResponse(res);
+  },
+
+  async triggerIngestion({ targetDate = null, catchupDays = 1 } = {}) {
+    const res = await fetch(`${API_BASE_URL}/api/ingestion/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target_date: targetDate,
+        catchup_days: catchupDays
+      })
+    });
+    return handleResponse(res);
   }
 };

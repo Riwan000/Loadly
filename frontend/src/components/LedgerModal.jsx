@@ -21,6 +21,8 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
   const [filterState, setFilterState] = useState(selectedState || '');
   const [reconciledOnly, setReconciledOnly] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncToast, setSyncToast] = useState(null);
 
   const fetchLedgerData = async () => {
     setLoading(true);
@@ -36,6 +38,21 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  const handleSyncActuals = async () => {
+    setIsSyncing(true);
+    setSyncToast(null);
+    try {
+      const res = await api.triggerIngestion({ catchupDays: 3 });
+      setSyncToast(`Sync complete! Reconciled ${res.reconciled_forecasts} forecasts across ${res.dates_processed?.length || 1} day(s).`);
+      await fetchLedgerData();
+    } catch (err) {
+      setSyncToast(`Sync failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setSyncToast(null), 5000);
     }
   };
 
@@ -158,9 +175,24 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
               />
               <span>Reconciled Only</span>
             </label>
+            <button
+              onClick={handleSyncActuals}
+              disabled={isSyncing}
+              className="flex items-center gap-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition-colors disabled:opacity-50 text-xs"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>{isSyncing ? 'Syncing...' : 'Sync & Verify Actuals'}</span>
+            </button>
           </div>
-          <div className="text-[11px] text-slate-400">
-            Showing latest {records.length} records
+          <div className="flex items-center gap-3">
+            {syncToast && (
+              <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 animate-fadeIn">
+                {syncToast}
+              </span>
+            )}
+            <span className="text-[11px] text-slate-400">
+              Showing latest {records.length} records
+            </span>
           </div>
         </div>
 

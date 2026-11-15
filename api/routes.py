@@ -30,6 +30,7 @@ from utils.prediction_ledger import (
     get_verification_metrics,
     query_ledger
 )
+from utils.ingestion_worker import run_ingestion_pipeline
 
 from api.schemas import (
     StatesResponse, StateItem,
@@ -43,7 +44,8 @@ from api.schemas import (
     HealthResponse,
     LedgerRecordsResponse, LedgerRecordItem,
     VerificationMetricsResponse,
-    ActualDemandIngestRequest, ActualDemandIngestResponse
+    ActualDemandIngestRequest, ActualDemandIngestResponse,
+    IngestionRunRequest, IngestionRunResponse
 )
 
 router = APIRouter(prefix="/api", tags=["Forecasting Platform"])
@@ -536,4 +538,35 @@ def ingest_actual_demands(req: ActualDemandIngestRequest):
     records_list = [r.model_dump() if hasattr(r, "model_dump") else r.dict() for r in req.records]
     reconciled = record_actuals(records_list)
     return ActualDemandIngestResponse(reconciled_count=reconciled, status="success")
+
+
+# ============================================================================
+# 7. Automated Ingestion & Pipeline Triggers
+# ============================================================================
+@router.post("/ingestion/run", response_model=IngestionRunResponse)
+def trigger_continuous_ingestion(req: IngestionRunRequest):
+    """
+    Trigger the automated continuous ingestion worker to fetch ground-truth
+    electricity consumption and reconcile matching predictions in the ledger.
+    """
+    parsed_date = None
+    if req.target_date:
+        try:
+            parsed_date = datetime.strptime(req.target_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    try:
+        summary = run_ingestion_pipeline(target_date=parsed_date, catchup_days=req.catchup_days)
+        return IngestionRunResponse(
+            status=summary["status"],
+            dates_processed=summary["dates_processed"],
+            total_actuals_ingested=summary["total_actuals_ingested"],
+            reconciled_forecasts=summary["reconciled_forecasts"],
+            verification_metrics=summary.get("verification_metrics"),
+            executed_at=summary["executed_at"]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion worker failed: {str(e)}")
+
 

@@ -215,3 +215,21 @@ class ActualDemandIngestResponse(BaseModel):
     reconciled_count: int
     status: str = "success"
 
+
+# ---------------------------------------------------------------------------
+# Continuous Ingestion Pipeline
+# ---------------------------------------------------------------------------
+class IngestionRunRequest(BaseModel):
+    target_date: Optional[str] = Field(None, json_schema_extra={"example": "2026-11-14"})
+    catchup_days: int = Field(1, ge=1, le=30, json_schema_extra={"example": 1})
+
+
+class IngestionRunResponse(BaseModel):
+    status: str = "success"
+    dates_processed: List[str]
+    total_actuals_ingested: int
+    reconciled_forecasts: int
+    verification_metrics: Optional[Dict[str, Any]] = None
+    executed_at: str
+
+
