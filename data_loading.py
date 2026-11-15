@@ -192,6 +192,33 @@ def load_historical_demand(state_name):
         'Andaman and Nicobar': 'Andaman and Nicobar Islands'
     }
 
+    if state_name in ('All-India', 'National'):
+        possible_paths = [
+            'data/daily_energy_met_MU.csv',
+            '../data/daily_energy_met_MU.csv',
+            'data/14983362/daily_energy_met_MU.csv',
+            '../data/14983362/daily_energy_met_MU.csv'
+        ]
+        for file_path in possible_paths:
+            if os.path.exists(file_path):
+                try:
+                    df = pd.read_csv(file_path)
+                    date_col = 'Date' if 'Date' in df.columns else 'date'
+                    if date_col not in df.columns:
+                        continue
+                    state_cols = [c for c in df.columns if c != date_col and c != 'dt_str']
+                    national_sum = df[state_cols].apply(pd.to_numeric, errors='coerce').sum(axis=1)
+                    demand_df = pd.DataFrame({
+                        'date': pd.to_datetime(df[date_col]),
+                        'actual_demand_MU': national_sum
+                    }).dropna()
+                    if len(demand_df) > 0:
+                        return demand_df
+                except Exception as e:
+                    logger.warning(f"Error loading national demand from {file_path}: {e}")
+                    continue
+        return None
+
     column_name = state_column_map.get(state_name)
     if column_name is None:
         return None

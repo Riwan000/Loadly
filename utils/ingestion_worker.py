@@ -146,6 +146,13 @@ def fetch_actual_grid_demand(target_date: date) -> List[Dict[str, Any]]:
                                 "source": "historical_csv"
                             })
                     if len(results) >= 20:
+                        all_india_actual = sum(r["actual_demand_mu"] for r in results if r["state"] in ALL_STATES)
+                        results.append({
+                            "state": "All-India",
+                            "target_date": date_str,
+                            "actual_demand_mu": round(float(all_india_actual), 2),
+                            "source": "national_aggregate_csv"
+                        })
                         return results
         except Exception as e:
             logger.debug(f"Cache lookup failed: {e}")
@@ -170,6 +177,15 @@ def fetch_actual_grid_demand(target_date: date) -> List[Dict[str, Any]]:
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(_process_state, ALL_STATES))
+
+    if results:
+        all_india_actual = sum(r["actual_demand_mu"] for r in results if r["state"] in ALL_STATES)
+        results.append({
+            "state": "All-India",
+            "target_date": date_str,
+            "actual_demand_mu": round(float(all_india_actual), 2),
+            "source": "national_aggregate_telemetry"
+        })
 
     return results
 

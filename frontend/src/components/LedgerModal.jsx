@@ -159,13 +159,37 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
         <div className="px-6 py-3 bg-slate-50/80 dark:bg-slate-900/30 border-b border-executive-borderLight dark:border-executive-borderDark flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-3">
             <span className="font-semibold text-slate-500 dark:text-slate-400">Filter Scope:</span>
-            <input
-              type="text"
-              placeholder="State name..."
-              value={filterState}
-              onChange={(e) => setFilterState(e.target.value)}
-              className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs w-36 focus:outline-none"
-            />
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                placeholder="State or All-India..."
+                value={filterState}
+                onChange={(e) => setFilterState(e.target.value)}
+                className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs w-36 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setFilterState('')}
+                className={`px-2 py-1 text-[11px] font-semibold border transition-colors ${
+                  filterState === ''
+                    ? 'bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900 border-transparent'
+                    : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                All Grid
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilterState('All-India')}
+                className={`px-2 py-1 text-[11px] font-semibold border transition-colors ${
+                  filterState.toLowerCase() === 'all-india'
+                    ? 'bg-executive-navy text-white dark:bg-executive-cyan dark:text-slate-900 border-transparent'
+                    : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                All-India National
+              </button>
+            </div>
             <label className="flex items-center gap-1.5 cursor-pointer text-slate-600 dark:text-slate-300">
               <input
                 type="checkbox"
