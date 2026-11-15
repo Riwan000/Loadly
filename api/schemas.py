@@ -48,6 +48,7 @@ class ForecastTimelineItem(BaseModel):
     cdd: float
     extreme_heat: int
     is_holiday: int
+    regional_shares: Optional[Dict[str, float]] = None
 
 
 class ForecastSummary(BaseModel):
@@ -58,6 +59,11 @@ class ForecastSummary(BaseModel):
     high_risk_days_count: int
     state_rmse: Optional[float] = None
     confidence_level: float = 0.90
+    is_national: bool = False
+    regional_breakdown: Optional[Dict[str, float]] = None
+    top_contributors: Optional[List[Dict[str, Any]]] = None
+    extreme_heat_states: Optional[List[str]] = None
+
 
 
 class ForecastResponse(BaseModel):

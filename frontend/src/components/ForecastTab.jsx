@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { 
   ResponsiveContainer, 
   ComposedChart, 
+  AreaChart,
   Line, 
   Area, 
   Bar, 
@@ -24,7 +25,10 @@ import {
   Info,
   Layers,
   SunMedium,
-  Download
+  Download,
+  Globe,
+  MapPin,
+  Zap
 } from 'lucide-react';
 
 export default function ForecastTab({
@@ -97,21 +101,47 @@ export default function ForecastTab({
   // Find peak timeline item
   const peakItem = timeline.find(t => t.date === summary.peak_demand_date);
 
+  const isNational = Boolean(summary?.is_national || state === 'All-India');
+
   // Export CSV
   const handleExportCSV = () => {
     if (!timeline.length) return;
-    const headers = ['Date', 'Forecast Demand (MU)', 'Lower Bound (MU)', 'Upper Bound (MU)', 'Mean Temp (C)', 'Max Temp (C)', 'CDD', 'Extreme Heat', 'Holiday'];
-    const rows = timeline.map(t => [
-      t.date,
-      t.forecasted_demand_mu,
-      t.lower_bound_mu ?? '',
-      t.upper_bound_mu ?? '',
-      t.temperature_mean_c,
-      t.temperature_max_c,
-      t.cdd,
-      t.extreme_heat ? 'Yes' : 'No',
-      t.is_holiday ? 'Yes' : 'No'
-    ]);
+    const headers = isNational
+      ? ['Date', 'National Forecast Demand (MU)', 'Lower Bound (MU)', 'Upper Bound (MU)', 'Northern NR (MU)', 'Western WR (MU)', 'Southern SR (MU)', 'Eastern ER (MU)', 'North-Eastern NER (MU)', 'Mean Temp (C)', 'Max Temp (C)', 'CDD', 'Extreme Heat', 'Holiday']
+      : ['Date', 'Forecast Demand (MU)', 'Lower Bound (MU)', 'Upper Bound (MU)', 'Mean Temp (C)', 'Max Temp (C)', 'CDD', 'Extreme Heat', 'Holiday'];
+
+    const rows = timeline.map(t => {
+      if (isNational) {
+        return [
+          t.date,
+          t.forecasted_demand_mu,
+          t.lower_bound_mu ?? '',
+          t.upper_bound_mu ?? '',
+          t.regional_shares?.nr ?? '',
+          t.regional_shares?.wr ?? '',
+          t.regional_shares?.sr ?? '',
+          t.regional_shares?.er ?? '',
+          t.regional_shares?.ner ?? '',
+          t.temperature_mean_c,
+          t.temperature_max_c,
+          t.cdd,
+          t.extreme_heat ? 'Yes' : 'No',
+          t.is_holiday ? 'Yes' : 'No'
+        ];
+      }
+      return [
+        t.date,
+        t.forecasted_demand_mu,
+        t.lower_bound_mu ?? '',
+        t.upper_bound_mu ?? '',
+        t.temperature_mean_c,
+        t.temperature_max_c,
+        t.cdd,
+        t.extreme_heat ? 'Yes' : 'No',
+        t.is_holiday ? 'Yes' : 'No'
+      ];
+    });
+
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
@@ -122,6 +152,20 @@ export default function ForecastTab({
     document.body.removeChild(link);
   };
 
+  // Prepare 5-Region stacked data for All-India view
+  const regionalChartData = React.useMemo(() => {
+    if (!isNational) return [];
+    return timeline.map(t => ({
+      date: t.date,
+      total: t.forecasted_demand_mu,
+      NR: t.regional_shares?.nr || 0,
+      WR: t.regional_shares?.wr || 0,
+      SR: t.regional_shares?.sr || 0,
+      ER: t.regional_shares?.er || 0,
+      NER: t.regional_shares?.ner || 0,
+    }));
+  }, [timeline, isNational]);
+
   return (
     <div className="space-y-6">
       
@@ -129,15 +173,31 @@ export default function ForecastTab({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-executive-cardDark p-4 rounded-none border border-executive-borderLight dark:border-executive-borderDark shadow-sm">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-xl font-black tracking-tight text-executive-textLight dark:text-executive-textDark">
-              {state}
-            </h2>
-            <span className="text-xs px-2.5 py-0.5 rounded-none font-medium bg-slate-100 dark:bg-slate-800 text-executive-mutedLight dark:text-executive-mutedDark">
-              {horizonDays}-Day Outlook
-            </span>
+            {isNational ? (
+              <>
+                <Globe className="w-5 h-5 text-executive-navy dark:text-executive-cyan" />
+                <h2 className="text-xl font-black tracking-tight text-executive-textLight dark:text-executive-textDark">
+                  ⚡ All-India National Grid
+                </h2>
+                <span className="text-xs px-2.5 py-0.5 rounded-none font-semibold bg-executive-navy/10 dark:bg-executive-cyan/20 text-executive-navy dark:text-executive-cyan border border-executive-navy/20 dark:border-executive-cyan/30">
+                  National Aggregate • {horizonDays}-Day Outlook
+                </span>
+              </>
+            ) : (
+              <>
+                <h2 className="text-xl font-black tracking-tight text-executive-textLight dark:text-executive-textDark">
+                  {state}
+                </h2>
+                <span className="text-xs px-2.5 py-0.5 rounded-none font-medium bg-slate-100 dark:bg-slate-800 text-executive-mutedLight dark:text-executive-mutedDark">
+                  {horizonDays}-Day Outlook
+                </span>
+              </>
+            )}
           </div>
           <p className="text-xs text-executive-mutedLight dark:text-executive-mutedDark mt-0.5">
-            {forecastData?.model_name || metadata?.model_type || 'Production ML'} predictions with 90% confidence uncertainty envelopes and thermal load features
+            {isNational
+              ? 'Hierarchical bottom-up summation across 36 Indian States & UTs with diversified portfolio uncertainty envelope'
+              : `${forecastData?.model_name || metadata?.model_type || 'Production ML'} predictions with 90% confidence uncertainty envelopes and thermal load features`}
           </p>
         </div>
 
@@ -180,7 +240,7 @@ export default function ForecastTab({
         {/* Average Demand */}
         <div className="p-4 rounded-none bg-white dark:bg-executive-cardDark border border-executive-borderLight dark:border-executive-borderDark shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between text-executive-mutedLight dark:text-executive-mutedDark">
-            <span className="text-xs font-medium">Avg Daily Demand</span>
+            <span className="text-xs font-medium">{isNational ? 'Avg Daily National Load' : 'Avg Daily Demand'}</span>
             <TrendingUp className="w-4 h-4 text-executive-navy dark:text-executive-cyan" />
           </div>
           <div className="mt-2">
@@ -188,14 +248,16 @@ export default function ForecastTab({
               {summary.avg_daily_demand_mu}
               <span className="text-xs font-normal text-executive-mutedLight dark:text-executive-mutedDark ml-1">MU</span>
             </div>
-            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">Across {horizonDays} days</p>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+              {isNational ? 'National total across India' : `Across ${horizonDays} days`}
+            </p>
           </div>
         </div>
 
         {/* Peak Demand */}
         <div className="p-4 rounded-none bg-white dark:bg-executive-cardDark border border-executive-borderLight dark:border-executive-borderDark shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between text-executive-mutedLight dark:text-executive-mutedDark">
-            <span className="text-xs font-medium">Peak Forecast</span>
+            <span className="text-xs font-medium">{isNational ? 'National Peak Forecast' : 'Peak Forecast'}</span>
             <ArrowUpRight className="w-4 h-4 text-rose-500" />
           </div>
           <div className="mt-2">
@@ -210,7 +272,7 @@ export default function ForecastTab({
         {/* Min Demand */}
         <div className="p-4 rounded-none bg-white dark:bg-executive-cardDark border border-executive-borderLight dark:border-executive-borderDark shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between text-executive-mutedLight dark:text-executive-mutedDark">
-            <span className="text-xs font-medium">Min Demand</span>
+            <span className="text-xs font-medium">{isNational ? 'National Base Load' : 'Min Demand'}</span>
             <ArrowDownRight className="w-4 h-4 text-emerald-500" />
           </div>
           <div className="mt-2">
@@ -233,22 +295,28 @@ export default function ForecastTab({
               {summary.high_risk_days_count}
               <span className="text-xs font-normal text-executive-mutedLight dark:text-executive-mutedDark ml-1">Days &gt; 31.8°C</span>
             </div>
-            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">Severe thermal surge load</p>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+              {isNational && summary.extreme_heat_states?.length > 0
+                ? `${summary.extreme_heat_states.length} states impacted`
+                : 'Severe thermal surge load'}
+            </p>
           </div>
         </div>
 
         {/* State Model Uncertainty (RMSE) */}
         <div className="p-4 rounded-none bg-white dark:bg-executive-cardDark border border-executive-borderLight dark:border-executive-borderDark shadow-sm flex flex-col justify-between col-span-2 lg:col-span-1">
           <div className="flex items-center justify-between text-executive-mutedLight dark:text-executive-mutedDark">
-            <span className="text-xs font-medium">Model CI (90%)</span>
+            <span className="text-xs font-medium">{isNational ? 'Portfolio Sigma (90%)' : 'Model CI (90%)'}</span>
             <ShieldCheck className="w-4 h-4 text-emerald-500" />
           </div>
           <div className="mt-2">
             <div className="text-2xl font-black text-executive-textLight dark:text-executive-textDark">
               ±{summary.state_rmse ? summary.state_rmse : '3.20'}
-              <span className="text-xs font-normal text-executive-mutedLight dark:text-executive-mutedDark ml-1">MU RMSE</span>
+              <span className="text-xs font-normal text-executive-mutedLight dark:text-executive-mutedDark ml-1">MU</span>
             </div>
-            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">State-specific validation error</p>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+              {isNational ? `Margin: ±${(summary.state_rmse * 1.645).toFixed(1)} MU` : 'State-specific validation error'}
+            </p>
           </div>
         </div>
 
@@ -394,6 +462,141 @@ export default function ForecastTab({
         </div>
       </div>
 
+      {/* National 5-Region Breakdown & Drivers (Only in All-India Mode) */}
+      {isNational && (
+        <div className="space-y-6">
+          {/* 5-Region Stacked Area Chart */}
+          <div className="bg-white dark:bg-executive-cardDark p-4 sm:p-6 rounded-none border border-executive-borderLight dark:border-executive-borderDark shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+              <div>
+                <h3 className="text-base font-bold text-executive-textLight dark:text-executive-textDark flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-executive-navy dark:text-executive-cyan" />
+                  5-Region Hierarchical Demand Composition (NR, WR, SR, ER, NER)
+                </h3>
+                <p className="text-xs text-executive-mutedLight dark:text-executive-mutedDark">
+                  Stacked daily power demand showing each region's real-time contribution towards India's ~5,300 MU national load
+                </p>
+              </div>
+            </div>
+
+            <div className="h-72 sm:h-80 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={regionalChartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={colors.grid} vertical={false} />
+                  <XAxis 
+                    dataKey="date" 
+                    tick={{ fill: colors.text, fontSize: 11 }} 
+                    stroke={colors.grid}
+                    tickFormatter={(val) => {
+                      const d = new Date(val);
+                      return `${d.getDate()} ${d.toLocaleString('default', { month: 'short' })}`;
+                    }}
+                  />
+                  <YAxis 
+                    tick={{ fill: colors.text, fontSize: 11 }} 
+                    stroke={colors.grid}
+                    label={{ value: 'Regional Load (MU)', angle: -90, position: 'insideLeft', fill: colors.text, fontSize: 11 }}
+                  />
+                  <Tooltip content={<RegionalTooltip />} />
+                  <Legend wrapperStyle={{ paddingTop: '10px', fontSize: '12px' }} />
+                  <Area type="monotone" dataKey="NR" name="Northern Region (NR)" stackId="1" stroke="#0284C7" fill="#0284C7" fillOpacity={0.65} />
+                  <Area type="monotone" dataKey="WR" name="Western Region (WR)" stackId="1" stroke="#D97706" fill="#D97706" fillOpacity={0.65} />
+                  <Area type="monotone" dataKey="SR" name="Southern Region (SR)" stackId="1" stroke="#059669" fill="#059669" fillOpacity={0.65} />
+                  <Area type="monotone" dataKey="ER" name="Eastern Region (ER)" stackId="1" stroke="#7C3AED" fill="#7C3AED" fillOpacity={0.65} />
+                  <Area type="monotone" dataKey="NER" name="North-Eastern (NER)" stackId="1" stroke="#E11D48" fill="#E11D48" fillOpacity={0.65} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Regional Shares & Top Contributor States Cards Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            
+            {/* Top 5 Driver States */}
+            <div className="bg-white dark:bg-executive-cardDark p-5 rounded-none border border-executive-borderLight dark:border-executive-borderDark shadow-sm">
+              <div className="flex items-center justify-between pb-3 border-b border-executive-borderLight dark:border-executive-borderDark">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-executive-textLight dark:text-executive-textDark flex items-center gap-2">
+                  <MapPin className="w-3.5 h-3.5 text-executive-navy dark:text-executive-cyan" />
+                  Top 5 Power Consuming States
+                </h4>
+                <span className="text-[11px] font-medium text-executive-mutedLight dark:text-executive-mutedDark">
+                  % of All-India Load
+                </span>
+              </div>
+              <div className="mt-4 space-y-3">
+                {summary.top_contributors?.map((item, idx) => (
+                  <div key={item.state} className="space-y-1">
+                    <div className="flex justify-between items-center text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-none bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold flex items-center justify-center text-[10px]">
+                          {idx + 1}
+                        </span>
+                        <span className="font-semibold text-executive-textLight dark:text-executive-textDark">
+                          {item.state}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.2 rounded-none bg-slate-100 dark:bg-slate-800 text-slate-500 font-medium">
+                          {item.region}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="font-bold text-executive-navy dark:text-executive-cyan">
+                          {item.avg_demand_mu} MU/day
+                        </span>
+                        <span className="font-black text-slate-600 dark:text-slate-300 w-12 text-right">
+                          {item.share_pct}%
+                        </span>
+                      </div>
+                    </div>
+                    {/* Progress Bar */}
+                    <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-none overflow-hidden">
+                      <div 
+                        className="bg-executive-navy dark:bg-executive-cyan h-full transition-all"
+                        style={{ width: `${Math.min(100, item.share_pct * 5)}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 5-Region Aggregate Breakdown */}
+            <div className="bg-white dark:bg-executive-cardDark p-5 rounded-none border border-executive-borderLight dark:border-executive-borderDark shadow-sm">
+              <div className="flex items-center justify-between pb-3 border-b border-executive-borderLight dark:border-executive-borderDark">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-executive-textLight dark:text-executive-textDark flex items-center gap-2">
+                  <Globe className="w-3.5 h-3.5 text-emerald-500" />
+                  Regional Grid Slices (5 Regions)
+                </h4>
+                <span className="text-[11px] font-medium text-executive-mutedLight dark:text-executive-mutedDark">
+                  Avg Daily Demand
+                </span>
+              </div>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {[
+                  { key: 'nr', name: 'Northern Region (NR)', color: 'text-sky-600 dark:text-sky-400', border: 'border-sky-500/30' },
+                  { key: 'wr', name: 'Western Region (WR)', color: 'text-amber-600 dark:text-amber-400', border: 'border-amber-500/30' },
+                  { key: 'sr', name: 'Southern Region (SR)', color: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-500/30' },
+                  { key: 'er', name: 'Eastern Region (ER)', color: 'text-purple-600 dark:text-purple-400', border: 'border-purple-500/30' },
+                  { key: 'ner', name: 'North-Eastern (NER)', color: 'text-rose-600 dark:text-rose-400', border: 'border-rose-500/30' }
+                ].map((reg) => {
+                  const val = summary.regional_breakdown?.[reg.key] || 0;
+                  const pct = summary.avg_daily_demand_mu > 0 ? (val / summary.avg_daily_demand_mu * 100).toFixed(1) : 0;
+                  return (
+                    <div key={reg.key} className={`p-3 rounded-none bg-slate-50 dark:bg-slate-900/40 border ${reg.border} flex flex-col justify-between`}>
+                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">{reg.name}</span>
+                      <div className="mt-1 flex items-baseline justify-between">
+                        <span className={`text-base font-black ${reg.color}`}>{val.toFixed(1)} <span className="text-xs font-normal text-slate-400">MU</span></span>
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-200">{pct}%</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* Daily Breakdown Table Section */}
       <div className="bg-white dark:bg-executive-cardDark rounded-none border border-executive-borderLight dark:border-executive-borderDark shadow-sm overflow-hidden">
         <div 
@@ -417,8 +620,17 @@ export default function ForecastTab({
               <thead className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200/80 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-semibold">
                 <tr>
                   <th className="py-3 px-4">Date</th>
-                  <th className="py-3 px-4">Forecast Demand</th>
+                  <th className="py-3 px-4">{isNational ? 'National Total' : 'Forecast Demand'}</th>
                   <th className="py-3 px-4">90% CI Envelope</th>
+                  {isNational && (
+                    <>
+                      <th className="py-3 px-4">NR (MU)</th>
+                      <th className="py-3 px-4">WR (MU)</th>
+                      <th className="py-3 px-4">SR (MU)</th>
+                      <th className="py-3 px-4">ER (MU)</th>
+                      <th className="py-3 px-4">NER (MU)</th>
+                    </>
+                  )}
                   <th className="py-3 px-4">Mean Temp</th>
                   <th className="py-3 px-4">Max Temp</th>
                   <th className="py-3 px-4">CDD</th>
@@ -452,6 +664,25 @@ export default function ForecastTab({
                           ? `${row.lower_bound_mu.toFixed(1)} – ${row.upper_bound_mu.toFixed(1)} MU`
                           : '—'}
                       </td>
+                      {isNational && (
+                        <>
+                          <td className="py-3 px-4 text-sky-600 dark:text-sky-400 font-medium">
+                            {row.regional_shares?.nr?.toFixed(1) ?? '—'}
+                          </td>
+                          <td className="py-3 px-4 text-amber-600 dark:text-amber-400 font-medium">
+                            {row.regional_shares?.wr?.toFixed(1) ?? '—'}
+                          </td>
+                          <td className="py-3 px-4 text-emerald-600 dark:text-emerald-400 font-medium">
+                            {row.regional_shares?.sr?.toFixed(1) ?? '—'}
+                          </td>
+                          <td className="py-3 px-4 text-purple-600 dark:text-purple-400 font-medium">
+                            {row.regional_shares?.er?.toFixed(1) ?? '—'}
+                          </td>
+                          <td className="py-3 px-4 text-rose-600 dark:text-rose-400 font-medium">
+                            {row.regional_shares?.ner?.toFixed(1) ?? '—'}
+                          </td>
+                        </>
+                      )}
                       <td className="py-3 px-4">
                         {row.temperature_mean_c.toFixed(1)} °C
                       </td>
@@ -549,3 +780,44 @@ function CustomTooltip({ active, payload, label }) {
     </div>
   );
 }
+
+// Tooltip for 5-Region Stacked Area Chart
+function RegionalTooltip({ active, payload, label }) {
+  if (!active || !payload || !payload.length) return null;
+  const data = payload[0]?.payload;
+  if (!data) return null;
+
+  return (
+    <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-3.5 rounded-none border border-slate-200 dark:border-slate-800 shadow-xl text-xs space-y-2 min-w-[220px]">
+      <div className="font-bold border-b border-slate-200 dark:border-slate-800 pb-1.5 flex items-center justify-between">
+        <span>{data.date}</span>
+        <span className="text-blue-600 dark:text-sky-400 font-black">
+          Total: {data.total?.toFixed(1)} MU
+        </span>
+      </div>
+      <div className="space-y-1">
+        <div className="flex justify-between items-center text-sky-600 dark:text-sky-400">
+          <span>Northern (NR):</span>
+          <span className="font-semibold">{data.NR?.toFixed(1)} MU</span>
+        </div>
+        <div className="flex justify-between items-center text-amber-600 dark:text-amber-400">
+          <span>Western (WR):</span>
+          <span className="font-semibold">{data.WR?.toFixed(1)} MU</span>
+        </div>
+        <div className="flex justify-between items-center text-emerald-600 dark:text-emerald-400">
+          <span>Southern (SR):</span>
+          <span className="font-semibold">{data.SR?.toFixed(1)} MU</span>
+        </div>
+        <div className="flex justify-between items-center text-purple-600 dark:text-purple-400">
+          <span>Eastern (ER):</span>
+          <span className="font-semibold">{data.ER?.toFixed(1)} MU</span>
+        </div>
+        <div className="flex justify-between items-center text-rose-600 dark:text-rose-400">
+          <span>North-Eastern (NER):</span>
+          <span className="font-semibold">{data.NER?.toFixed(1)} MU</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+

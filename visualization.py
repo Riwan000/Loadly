@@ -429,6 +429,22 @@ def get_seasonal_comparison(state_name, current_season, historical_df=None):
     """
     from data_loading import load_climatology_reference
     ref = load_climatology_reference()
+
+    if state_name in ("All-India", "National") and ref:
+        national_seasons = {}
+        for s in ['Summer', 'Monsoon', 'Winter', 'Autumn']:
+            temps_mean = [ref[st]['seasons'][s]['temp_mean'] for st in ref if s in ref[st].get('seasons', {})]
+            temps_max = [ref[st]['seasons'][s]['temp_max'] for st in ref if s in ref[st].get('seasons', {})]
+            cdds = [ref[st]['seasons'][s]['cdd_mean'] for st in ref if s in ref[st].get('seasons', {})]
+            heats = [ref[st]['seasons'][s]['extreme_heat_pct'] for st in ref if s in ref[st].get('seasons', {})]
+            national_seasons[s] = {
+                'temp_mean': float(np.mean(temps_mean)) if temps_mean else 25.0,
+                'temp_max': float(np.mean(temps_max)) if temps_max else 30.0,
+                'cdd_mean': float(np.mean(cdds)) if cdds else 2.0,
+                'extreme_heat_pct': float(np.mean(heats)) if heats else 5.0
+            }
+        return national_seasons
+
     if ref and state_name in ref and ref[state_name].get("seasons"):
         return ref[state_name]["seasons"]
 

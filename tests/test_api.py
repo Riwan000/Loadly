@@ -250,3 +250,74 @@ def test_spa_unknown_route_returns_index_html():
 @requires_dist
 def test_spa_does_not_shadow_api_404():
     assert client.get("/api/does-not-exist").status_code == 404
+
+
+def test_post_forecast_all_india_aggregate():
+    """Verify All-India national bottom-up hierarchical aggregate forecast."""
+    payload = {
+        "state": "All-India",
+        "horizon_days": 7,
+        "use_weather_api": False
+    }
+    response = client.post("/api/forecast", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["state"] == "All-India"
+    assert data["horizon_days"] == 7
+    assert data["summary"]["is_national"] is True
+    # National total should reflect aggregate Indian grid (~5,000+ MU daily)
+    assert data["summary"]["avg_daily_demand_mu"] > 4000
+    assert data["summary"]["peak_demand_mu"] >= data["summary"]["min_demand_mu"]
+
+    # 5-Region breakdown verification
+    reg_breakdown = data["summary"]["regional_breakdown"]
+    assert reg_breakdown is not None
+    for reg in ["nr", "wr", "sr", "er", "ner"]:
+        assert reg in reg_breakdown
+        assert reg_breakdown[reg] > 0
+
+    # Top contributors verification
+    top_5 = data["summary"]["top_contributors"]
+    assert top_5 is not None
+    assert len(top_5) == 5
+    assert all("state" in item and "avg_demand_mu" in item and "share_pct" in item for item in top_5)
+
+    # Timeline verification with regional shares
+    assert len(data["timeline"]) == 7
+    first_item = data["timeline"][0]
+    assert first_item["regional_shares"] is not None
+    for reg in ["nr", "wr", "sr", "er", "ner"]:
+        assert reg in first_item["regional_shares"]
+
+
+def test_weather_impact_all_india():
+    """Verify weather impact analytics for All-India aggregate."""
+    payload = {
+        "state": "All-India",
+        "mode": "forecast",
+        "horizon_days": 7,
+        "use_weather_api": False
+    }
+    response = client.post("/api/analytics/weather-impact", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["state"] == "All-India"
+    assert "correlations" in data
+    assert "natural_language_insight" in data
+    assert "All-India National Grid Outlook" in data["natural_language_insight"]
+    assert len(data["series"]) == 7
+
+
+def test_seasonal_comparison_all_india():
+    """Verify seasonal comparison returns aggregate Indian national averages."""
+    response = client.get("/api/analytics/seasonal-comparison?state=All-India")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["state"] == "All-India"
+    assert "seasons" in data
+    assert "Summer" in data["seasons"]
+    assert "Winter" in data["seasons"]
+

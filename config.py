@@ -5,6 +5,7 @@
 # State to coordinates mapping (approximate centers of Indian states)
 # These coordinates are used to fetch weather data from APIs
 STATE_COORDINATES = {
+    "All-India": {"lat": 20.5937, "lon": 78.9629},
     "Kerala": {"lat": 10.8505, "lon": 76.2711},
     "Goa": {"lat": 15.2993, "lon": 74.1240},
     "Maharashtra": {"lat": 19.7515, "lon": 75.7139},
@@ -54,3 +55,6 @@ ALL_STATES = [
     "Puducherry", "Chandigarh", "Dadra and Nagar Haveli", "Daman and Diu",
     "Lakshadweep", "Andaman and Nicobar"
 ]
+
+NATIONAL_STATE = "All-India"
+
