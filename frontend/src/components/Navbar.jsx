@@ -1,16 +1,5 @@
 import React from 'react';
-import { 
-  Sun, 
-  Moon, 
-  Activity, 
-  CloudSun, 
-  MapPin, 
-  ChevronDown,
-  LineChart,
-  Flame,
-  Bot,
-  Database
-} from 'lucide-react';
+import { Sun, Moon } from 'lucide-react';
 
 const REGION_LABELS = {
   nr: 'Northern Region (NR)',
@@ -54,9 +43,9 @@ export default function Navbar({
   const isHealthy = health?.status === 'healthy';
 
   const tabs = [
-    { id: 'forecast', label: 'Demand Forecast', icon: LineChart },
-    { id: 'weather', label: 'Weather Impact', icon: Flame },
-    { id: 'assistant', label: 'AI Assistant', icon: Bot },
+    { id: 'forecast', label: 'Demand Forecast' },
+    { id: 'weather', label: 'Weather Impact' },
+    { id: 'assistant', label: 'AI Assistant' },
   ];
 
   return (
@@ -82,21 +71,19 @@ export default function Navbar({
           </div>
 
           {/* Center Tabs for Desktop */}
-          <nav className="hidden md:flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900/60 rounded-none border border-slate-200/80 dark:border-slate-800">
+          <nav className="hidden md:flex items-center h-9 p-1 bg-slate-100 dark:bg-slate-900/60 rounded-none border border-slate-200/80 dark:border-slate-800">
             {tabs.map((tab) => {
-              const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
                 <button
                   key={tab.id}
                   onClick={() => onSelectTab(tab.id)}
-                  className={`flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold rounded-none transition-all ${
+                  className={`flex items-center justify-center h-full px-3.5 text-xs font-semibold whitespace-nowrap rounded-none transition-all ${
                     isActive
                       ? 'bg-white dark:bg-executive-cardDark text-executive-navy dark:text-executive-cyan shadow-sm border border-slate-200 dark:border-slate-700'
                       : 'text-executive-mutedLight dark:text-executive-mutedDark hover:text-executive-textLight dark:hover:text-executive-textDark hover:bg-white/50 dark:hover:bg-slate-800/40'
                   }`}
                 >
-                  <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-executive-navy dark:text-executive-cyan' : ''}`} />
                   {tab.label}
                 </button>
               );
@@ -108,12 +95,11 @@ export default function Navbar({
             
             {/* State Selector */}
             <div className="relative">
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 dark:bg-slate-900/80 border border-executive-borderLight dark:border-executive-borderDark rounded-none text-xs font-semibold focus-within:ring-2 focus-within:ring-executive-navy/30 dark:focus-within:ring-executive-cyan/30">
-                <MapPin className="w-3.5 h-3.5 text-executive-orange dark:text-executive-gold flex-shrink-0" />
+              <div className="flex items-center h-9 px-3 bg-slate-100 dark:bg-slate-900/80 border border-executive-borderLight dark:border-executive-borderDark rounded-none text-xs font-semibold focus-within:ring-2 focus-within:ring-executive-navy/30 dark:focus-within:ring-executive-cyan/30">
                 <select
                   value={selectedState}
                   onChange={(e) => onSelectState(e.target.value)}
-                  className="bg-transparent border-none text-executive-textLight dark:text-executive-textDark focus:outline-none cursor-pointer pr-2 text-xs font-medium"
+                  className="h-full bg-transparent border-none text-executive-textLight dark:text-executive-textDark focus:outline-none cursor-pointer pr-1 text-xs font-medium whitespace-nowrap"
                 >
                   {Object.entries(groupedStates).map(([regionKey, stateItems]) => (
                     <optgroup key={regionKey} label={REGION_LABELS[regionKey] || regionKey.toUpperCase()}>
@@ -132,45 +118,42 @@ export default function Navbar({
             <button
               onClick={() => onToggleWeatherApi(!useWeatherApi)}
               title={useWeatherApi ? 'Using Live Open-Meteo Weather Forecast' : 'Using Climatology Historical Weather'}
-              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-none text-xs font-medium border transition-colors ${
+              className={`hidden sm:flex items-center justify-center h-9 px-3 rounded-none text-xs font-medium border whitespace-nowrap transition-colors ${
                 useWeatherApi
                   ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800/60 text-amber-800 dark:text-amber-300'
                   : 'bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400'
               }`}
             >
-              <CloudSun className={`w-3.5 h-3.5 ${useWeatherApi ? 'text-amber-500 dark:text-amber-400 animate-pulse' : ''}`} />
-              <span className="hidden lg:inline">{useWeatherApi ? 'Live Weather' : 'Climatology'}</span>
+              <span>{useWeatherApi ? 'Live Weather' : 'Climatology'}</span>
             </button>
 
             {/* Audit Ledger & Verification Button */}
             <button
               onClick={onOpenLedgerModal}
               title="Click to view Prediction Ledger & Verification Audit"
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-none text-xs font-medium border border-executive-navy/30 dark:border-executive-cyan/40 bg-executive-navy/5 dark:bg-executive-cyan/10 text-executive-navy dark:text-executive-cyan hover:bg-executive-navy/10 dark:hover:bg-executive-cyan/20 transition-all"
+              className="flex items-center justify-center h-9 px-3 rounded-none text-xs font-medium border border-executive-navy/30 dark:border-executive-cyan/40 bg-executive-navy/5 dark:bg-executive-cyan/10 text-executive-navy dark:text-executive-cyan hover:bg-executive-navy/10 dark:hover:bg-executive-cyan/20 whitespace-nowrap transition-all"
             >
-              <Database className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Ledger</span>
+              <span>Ledger</span>
             </button>
 
             {/* Health Status Pill */}
             <button
               onClick={onOpenHealthModal}
               title="Click to view System Health & Architecture Specs"
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-none text-xs font-medium border transition-all ${
+              className={`flex items-center justify-center h-9 px-3 rounded-none text-xs font-medium border whitespace-nowrap transition-all ${
                 isHealthy
                   ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50'
                   : 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800/60 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50'
               }`}
             >
-              <span className={`w-2 h-2 rounded-none ${isHealthy ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-              <span className="hidden lg:inline">{isHealthy ? 'Model Ready' : 'Degraded'}</span>
+              <span>{isHealthy ? 'Model Ready' : 'Degraded'}</span>
             </button>
 
             {/* Dark/Light Theme Toggle */}
             <button
               onClick={onToggleTheme}
               title={theme === 'dark' ? 'Switch to Executive Daylight (Light Mode)' : 'Switch to Executive Midnight (Dark Mode)'}
-              className="p-2 rounded-none text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 transition-colors"
+              className="flex items-center justify-center h-9 w-9 rounded-none text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 transition-colors"
             >
               {theme === 'dark' ? (
                 <Sun className="w-4 h-4 text-executive-gold" />
@@ -185,19 +168,17 @@ export default function Navbar({
         {/* Mobile Navigation Tabs */}
         <div className="flex md:hidden items-center justify-around py-2 border-t border-slate-200/80 dark:border-slate-800">
           {tabs.map((tab) => {
-            const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (
               <button
                 key={tab.id}
                 onClick={() => onSelectTab(tab.id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-none ${
+                className={`flex items-center justify-center h-8 px-3 text-xs font-semibold rounded-none ${
                   isActive
                     ? 'bg-executive-navy dark:bg-executive-cyan text-white dark:text-slate-950'
                     : 'text-executive-mutedLight dark:text-executive-mutedDark'
                 }`}
               >
-                <Icon className="w-3.5 h-3.5" />
                 {tab.label}
               </button>
             );
