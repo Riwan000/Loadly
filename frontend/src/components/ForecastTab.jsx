@@ -153,18 +153,17 @@ export default function ForecastTab({
   };
 
   // Prepare 5-Region stacked data for All-India view
-  const regionalChartData = React.useMemo(() => {
-    if (!isNational) return [];
-    return timeline.map(t => ({
-      date: t.date,
-      total: t.forecasted_demand_mu,
-      NR: t.regional_shares?.nr || 0,
-      WR: t.regional_shares?.wr || 0,
-      SR: t.regional_shares?.sr || 0,
-      ER: t.regional_shares?.er || 0,
-      NER: t.regional_shares?.ner || 0,
-    }));
-  }, [timeline, isNational]);
+  const regionalChartData = isNational
+    ? timeline.map(t => ({
+        date: t.date,
+        total: t.forecasted_demand_mu,
+        NR: t.regional_shares?.nr || 0,
+        WR: t.regional_shares?.wr || 0,
+        SR: t.regional_shares?.sr || 0,
+        ER: t.regional_shares?.er || 0,
+        NER: t.regional_shares?.ner || 0,
+      }))
+    : [];
 
   return (
     <div className="space-y-6">
