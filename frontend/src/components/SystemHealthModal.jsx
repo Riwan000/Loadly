@@ -169,6 +169,10 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata })
                     Extreme Heat: <strong className="text-executive-textLight dark:text-executive-textDark">{(metadata.extreme_heat_threshold_kelvin - 273.15).toFixed(1)}°C (305K)</strong>
                   </div>
                 </div>
+
+                <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800/80 text-[11px] text-executive-mutedLight dark:text-executive-mutedDark leading-relaxed">
+                  <span className="font-semibold text-sky-600 dark:text-sky-400">Inference Rule:</span> Generation features are set to 0.0 at inference time due to 24h transmission reporting lags; demand features use per-state historical averages.
+                </div>
               </div>
             </div>
           )}

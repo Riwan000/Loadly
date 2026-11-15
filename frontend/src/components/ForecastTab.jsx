@@ -30,6 +30,7 @@ import {
   MapPin,
   Zap
 } from 'lucide-react';
+import MethodologyModal from './MethodologyModal';
 
 export default function ForecastTab({
   forecastData,
@@ -42,6 +43,7 @@ export default function ForecastTab({
   metadata
 }) {
   const [showTable, setShowTable] = useState(true);
+  const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
 
   if (loading) {
     return (
@@ -83,6 +85,14 @@ export default function ForecastTab({
   if (!forecastData) return null;
 
   const { summary, timeline = [], warnings = [] } = forecastData;
+
+  // Filter out static methodology notes from amber banner (accessible via Methodology modal/tooltip)
+  const operationalWarnings = warnings.filter(
+    (w) =>
+      !w.toLowerCase().includes('generation features are set to 0.0') &&
+      !w.toLowerCase().includes('mathematically aggregated bottom-up') &&
+      !w.toLowerCase().includes('diversified national portfolio')
+  );
 
   // Chart theme colors from THEME.md
   const isDark = theme === 'dark';
@@ -193,11 +203,38 @@ export default function ForecastTab({
               </>
             )}
           </div>
-          <p className="text-xs text-executive-mutedLight dark:text-executive-mutedDark mt-0.5">
-            {isNational
-              ? 'Hierarchical bottom-up summation across 36 Indian States & UTs with diversified portfolio uncertainty envelope'
-              : `${forecastData?.model_name || metadata?.model_type || 'Production ML'} predictions with 90% confidence uncertainty envelopes and thermal load features`}
-          </p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
+            <p className="text-xs text-executive-mutedLight dark:text-executive-mutedDark">
+              {isNational
+                ? 'Hierarchical bottom-up summation across 36 Indian States & UTs with diversified portfolio uncertainty envelope'
+                : `${forecastData?.model_name || metadata?.model_type || 'Production ML'} predictions with 90% confidence uncertainty envelopes and thermal load features`}
+            </p>
+            <span className="text-slate-300 dark:text-slate-700 hidden sm:inline">•</span>
+            {/* Model Info & Methodology Tooltip Trigger */}
+            <div className="relative group inline-flex items-center">
+              <button
+                type="button"
+                onClick={() => setIsMethodologyOpen(true)}
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-executive-navy dark:text-executive-cyan hover:underline transition-colors focus:outline-none"
+              >
+                <Info className="w-3.5 h-3.5" />
+                <span>Model Info & Methodology</span>
+              </button>
+              {/* Tooltip on hover */}
+              <div className="pointer-events-none absolute left-0 bottom-full mb-2 hidden group-hover:block z-30 w-80 p-3 bg-slate-900/95 dark:bg-slate-950/95 text-slate-100 text-xs leading-relaxed rounded-none shadow-xl border border-slate-700 backdrop-blur-sm">
+                <div className="flex items-center gap-1.5 font-bold text-executive-cyan mb-1 text-[11px] uppercase tracking-wider">
+                  <Info className="w-3.5 h-3.5" />
+                  Inference Assumptions
+                </div>
+                <p className="text-slate-300 text-[11px]">
+                  Generation features are set to 0.0 at inference time. Demand-based features use per-state historical averages.
+                </p>
+                <div className="mt-1.5 pt-1.5 border-t border-slate-800 text-[10px] text-slate-400 font-medium">
+                  Click to open complete technical methodology & specifications
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Horizon Selector */}
@@ -219,9 +256,9 @@ export default function ForecastTab({
       </div>
 
       {/* Warnings & Domain Context */}
-      {warnings && warnings.length > 0 && (
+      {operationalWarnings && operationalWarnings.length > 0 && (
         <div className="space-y-2">
-          {warnings.map((warn, i) => (
+          {operationalWarnings.map((warn, i) => (
             <div 
               key={i} 
               className="px-4 py-3 rounded-none bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/50 text-amber-900 dark:text-amber-200 text-xs flex items-start gap-2.5"
@@ -717,6 +754,16 @@ export default function ForecastTab({
           </div>
         )}
       </div>
+
+      {/* Model Info & Methodology Modal */}
+      <MethodologyModal
+        isOpen={isMethodologyOpen}
+        onClose={() => setIsMethodologyOpen(false)}
+        metadata={metadata}
+        state={state}
+        horizonDays={horizonDays}
+        isNational={isNational}
+      />
 
     </div>
   );

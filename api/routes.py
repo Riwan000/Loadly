@@ -298,10 +298,7 @@ def generate_forecast_endpoint(req: ForecastRequest):
             extreme_heat_states=extreme_heat_states
         )
 
-        warnings = [
-            "National aggregate demand is mathematically aggregated bottom-up from all 36 Indian States and Union Territories.",
-            "Confidence envelopes represent the diversified national portfolio standard error (sigma = 31.5 MU, margin = 51.8 MU at 90% CI)."
-        ]
+        warnings = []
 
         try:
             timeline_dicts = [t.model_dump() if hasattr(t, "model_dump") else t.dict() for t in timeline]
@@ -400,9 +397,6 @@ def generate_forecast_endpoint(req: ForecastRequest):
             f"{req.state} is in the Eastern Region (ER), which was not included as a separate "
             "region in the model's training data. Forecasts for this state are approximate."
         )
-    warnings.append(
-        "Generation features are set to 0.0 at inference time. Demand-based features use per-state historical averages."
-    )
 
     # Non-blocking automatic logging to Prediction Ledger
     try:

@@ -24,12 +24,16 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState(null);
 
-  const fetchLedgerData = async () => {
+  const fetchLedgerData = async (stateParam, reconciledParam) => {
     setLoading(true);
+    const targetState = stateParam !== undefined ? stateParam : filterState;
+    const targetReconciled = reconciledParam !== undefined ? reconciledParam : reconciledOnly;
+
     try {
+      const cleanState = targetState ? targetState.trim() : undefined;
       const [metricsData, recordsData] = await Promise.all([
-        api.getLedgerMetrics({ state: filterState || undefined, daysWindow: 30 }),
-        api.getLedgerRecords({ state: filterState || undefined, limit: 100, reconciledOnly })
+        api.getLedgerMetrics({ state: cleanState, daysWindow: 30 }),
+        api.getLedgerRecords({ state: cleanState, limit: 100, reconciledOnly: targetReconciled })
       ]);
       setMetrics(metricsData);
       setRecords(recordsData.records || []);
@@ -47,7 +51,7 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
     try {
       const res = await api.triggerIngestion({ catchupDays: 3 });
       setSyncToast(`Sync complete! Reconciled ${res.reconciled_forecasts} forecasts across ${res.dates_processed?.length || 1} day(s).`);
-      await fetchLedgerData();
+      await fetchLedgerData(filterState, reconciledOnly);
     } catch (err) {
       setSyncToast(`Sync failed: ${err.message || 'Unknown error'}`);
     } finally {
@@ -56,17 +60,43 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
     }
   };
 
+  // On modal open, initialize filter to selectedState
   useEffect(() => {
     if (isOpen) {
-      setFilterState(selectedState || '');
-      fetchLedgerData();
+      const initial = selectedState || '';
+      setFilterState(initial);
+      setReconciledOnly(false);
+      fetchLedgerData(initial, false);
     }
-  }, [isOpen, selectedState, reconciledOnly]);
+  }, [isOpen]);
+
+  const handleSelectFilter = (newState) => {
+    setFilterState(newState);
+    fetchLedgerData(newState, reconciledOnly);
+  };
+
+  const handleToggleReconciled = (checked) => {
+    setReconciledOnly(checked);
+    fetchLedgerData(filterState, checked);
+  };
 
   const handleRefresh = () => {
     setRefreshing(true);
-    fetchLedgerData();
+    fetchLedgerData(filterState, reconciledOnly);
   };
+
+  // Instant reactive client-side filtering over retrieved records
+  const displayedRecords = React.useMemo(() => {
+    let list = records;
+    if (filterState && filterState.trim()) {
+      const q = filterState.trim().toLowerCase();
+      list = list.filter(r => r.state && r.state.toLowerCase().includes(q));
+    }
+    if (reconciledOnly) {
+      list = list.filter(r => r.actual_demand_mu !== null && r.actual_demand_mu !== undefined);
+    }
+    return list;
+  }, [records, filterState, reconciledOnly]);
 
   if (!isOpen) return null;
 
@@ -165,11 +195,24 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
                 placeholder="State or All-India..."
                 value={filterState}
                 onChange={(e) => setFilterState(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    fetchLedgerData(filterState, reconciledOnly);
+                  }
+                }}
                 className="px-2.5 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs w-36 focus:outline-none"
               />
               <button
                 type="button"
-                onClick={() => setFilterState('')}
+                onClick={() => fetchLedgerData(filterState, reconciledOnly)}
+                title="Apply state text filter"
+                className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 transition-colors"
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSelectFilter('')}
                 className={`px-2 py-1 text-[11px] font-semibold border transition-colors ${
                   filterState === ''
                     ? 'bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900 border-transparent'
@@ -180,7 +223,7 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
               </button>
               <button
                 type="button"
-                onClick={() => setFilterState('All-India')}
+                onClick={() => handleSelectFilter('All-India')}
                 className={`px-2 py-1 text-[11px] font-semibold border transition-colors ${
                   filterState.toLowerCase() === 'all-india'
                     ? 'bg-executive-navy text-white dark:bg-executive-cyan dark:text-slate-900 border-transparent'
@@ -194,7 +237,7 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
               <input
                 type="checkbox"
                 checked={reconciledOnly}
-                onChange={(e) => setReconciledOnly(e.target.checked)}
+                onChange={(e) => handleToggleReconciled(e.target.checked)}
                 className="rounded-none text-executive-navy focus:ring-0 cursor-pointer"
               />
               <span>Reconciled Only</span>
@@ -215,7 +258,7 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
               </span>
             )}
             <span className="text-[11px] text-slate-400">
-              Showing latest {records.length} records
+              Showing {displayedRecords.length} records
             </span>
           </div>
         </div>
@@ -227,11 +270,14 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
               <RefreshCw className="w-5 h-5 animate-spin" />
               <span>Loading ledger history...</span>
             </div>
-          ) : records.length === 0 ? (
+          ) : displayedRecords.length === 0 ? (
             <div className="text-center py-16 text-slate-400">
               <Database className="w-8 h-8 mx-auto mb-2 opacity-50" />
               <p className="font-medium text-sm">No ledger entries found</p>
-              <p className="text-xs mt-1">Generate a demand forecast to automatically record predictions.</p>
+              <p className="text-xs mt-1">
+                {filterState ? `No records matching "${filterState}".` : 'Generate a demand forecast to automatically record predictions.'}
+                {reconciledOnly && ' Try unchecking "Reconciled Only" or click "Sync & Verify Actuals".'}
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto border border-slate-200 dark:border-slate-800">
@@ -249,7 +295,7 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-mono">
-                  {records.map((r) => {
+                  {displayedRecords.map((r) => {
                     const isReconciled = r.actual_demand_mu != null;
                     return (
                       <tr 
