@@ -240,3 +240,86 @@ class IngestionRunResponse(BaseModel):
     executed_at: str
 
 
+# ---------------------------------------------------------------------------
+# MLOps Drift Detection & Adaptive Retraining
+# ---------------------------------------------------------------------------
+class DriftMetricsItem(BaseModel):
+    mape_pct: Optional[float] = None
+    mae_mu: Optional[float] = None
+    rmse_mu: Optional[float] = None
+    mean_bias_mu: Optional[float] = None
+    bias_z_score: float = 0.0
+    ci_coverage_pct: Optional[float] = None
+    baseline_mape_pct: float = 1.68
+    baseline_rmse_mu: float = 5.36
+
+
+class FeatureDriftItem(BaseModel):
+    temperature_psi: float = 0.0
+    cdd_psi: float = 0.0
+
+
+class DriftStatusResponse(BaseModel):
+    scope: str
+    status: str  # HEALTHY | WARNING | CRITICAL | INSUFFICIENT_DATA
+    sample_count: int
+    window_days: int
+    metrics: DriftMetricsItem
+    feature_drift: FeatureDriftItem
+    diagnostics: List[str]
+    recommended_action: str
+
+
+class RetrainRequest(BaseModel):
+    trigger_reason: str = Field("manual", json_schema_extra={"example": "manual_calibration"})
+    force: bool = Field(False, json_schema_extra={"example": False})
+
+
+class ModelEvalStats(BaseModel):
+    model_name: str
+    mae: Optional[float] = None
+    rmse: Optional[float] = None
+    r2: Optional[float] = None
+    ci_coverage_pct: Optional[float] = None
+
+
+class RetrainResponse(BaseModel):
+    decision: str  # PROMOTED | REJECTED
+    trigger_reason: str
+    champion: ModelEvalStats
+    challenger: ModelEvalStats
+    gate_passed: bool
+    notes: str
+    rollback_available: bool
+
+
+class RollbackResponse(BaseModel):
+    status: str
+    message: str
+    reloaded: bool
+
+
+class RetrainingHistoryItem(BaseModel):
+    id: int
+    retrained_at: str
+    trigger_reason: str
+    champion_model: Optional[str] = None
+    challenger_model: Optional[str] = None
+    champion_mae: Optional[float] = None
+    challenger_mae: Optional[float] = None
+    champion_rmse: Optional[float] = None
+    challenger_rmse: Optional[float] = None
+    champion_r2: Optional[float] = None
+    challenger_r2: Optional[float] = None
+    champion_coverage: Optional[float] = None
+    challenger_coverage: Optional[float] = None
+    decision: str
+    notes: Optional[str] = None
+
+
+class RetrainingHistoryResponse(BaseModel):
+    history: List[RetrainingHistoryItem]
+    total_count: int
+
+
+

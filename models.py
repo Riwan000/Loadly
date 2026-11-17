@@ -120,3 +120,13 @@ def get_state_rmse(state_name, metadata):
             return state_rmse_dict["Jammu and Kashmir"]
 
     return None
+
+
+def reload_model_cache():
+    """Clear memory caches for model and model metadata for zero-downtime hot reload."""
+    if hasattr(load_model, "cache_clear"):
+        load_model.cache_clear()
+    if hasattr(load_model_metadata, "cache_clear"):
+        load_model_metadata.cache_clear()
+    logger.info("Cleared in-memory model and metadata caches for hot reload.")
+

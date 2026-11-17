@@ -138,5 +138,40 @@ export const api = {
       })
     });
     return handleResponse(res);
+  },
+
+  // MLOps Drift Detection & Adaptive Retraining
+  async getDriftStatus({ state = null, windowDays = 14 } = {}) {
+    const params = new URLSearchParams();
+    if (state) params.append('state', state);
+    params.append('window_days', windowDays.toString());
+    const res = await fetch(`${API_BASE_URL}/api/mlops/drift-status?${params.toString()}`);
+    return handleResponse(res);
+  },
+
+  async triggerRetrain({ triggerReason = 'manual_calibration', force = false } = {}) {
+    const res = await fetch(`${API_BASE_URL}/api/mlops/retrain`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        trigger_reason: triggerReason,
+        force
+      })
+    });
+    return handleResponse(res);
+  },
+
+  async triggerRollback() {
+    const res = await fetch(`${API_BASE_URL}/api/mlops/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    return handleResponse(res);
+  },
+
+  async getRetrainingHistory({ limit = 15 } = {}) {
+    const params = new URLSearchParams({ limit: limit.toString() });
+    const res = await fetch(`${API_BASE_URL}/api/mlops/history?${params.toString()}`);
+    return handleResponse(res);
   }
 };

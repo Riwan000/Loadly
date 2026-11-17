@@ -32,6 +32,8 @@ from utils.prediction_ledger import (
     query_ledger
 )
 from utils.ingestion_worker import run_ingestion_pipeline
+from utils.drift_detector import compute_drift_metrics
+from utils.model_retrainer import retrain_model, rollback_model, get_retraining_history
 
 from api.schemas import (
     StatesResponse, StateItem,
@@ -46,7 +48,9 @@ from api.schemas import (
     LedgerRecordsResponse, LedgerRecordItem,
     VerificationMetricsResponse,
     ActualDemandIngestRequest, ActualDemandIngestResponse,
-    IngestionRunRequest, IngestionRunResponse
+    IngestionRunRequest, IngestionRunResponse,
+    DriftStatusResponse, RetrainRequest, RetrainResponse,
+    RollbackResponse, RetrainingHistoryResponse, RetrainingHistoryItem
 )
 
 router = APIRouter(prefix="/api", tags=["Forecasting Platform"])
@@ -784,5 +788,66 @@ def trigger_continuous_ingestion(req: IngestionRunRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ingestion worker failed: {str(e)}")
+
+
+# ============================================================================
+# 8. MLOps Drift Detection & Adaptive Retraining
+# ============================================================================
+@router.get("/mlops/drift-status", response_model=DriftStatusResponse)
+def get_model_drift_status(
+    state: Optional[str] = Query(None, description="Scope filter (e.g. 'All-India', 'Maharashtra', or None for all)"),
+    window_days: int = Query(14, ge=1, le=90, description="Trailing lookback window in days")
+):
+    """
+    Evaluate real-time statistical drift against verified prediction ledger records:
+    MAPE decay, Directional Bias (MBE) with Z-Score, Empirical CI Coverage, and Covariate PSI.
+    """
+    try:
+        report = compute_drift_metrics(state=state, window_days=window_days)
+        return DriftStatusResponse(**report)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute drift status: {str(e)}")
+
+
+@router.post("/mlops/retrain", response_model=RetrainResponse)
+def trigger_model_retraining(req: RetrainRequest):
+    """
+    Execute Champion vs Challenger retraining pipeline with validation gate and atomic zero-downtime deployment.
+    """
+    try:
+        result = retrain_model(trigger_reason=req.trigger_reason, force=req.force)
+        return RetrainResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Retraining failed: {str(e)}")
+
+
+@router.post("/mlops/rollback", response_model=RollbackResponse)
+def trigger_model_rollback():
+    """
+    Roll back production model weights to previous champion version (best_model_prev.pkl).
+    """
+    try:
+        result = rollback_model()
+        return RollbackResponse(**result)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rollback failed: {str(e)}")
+
+
+@router.get("/mlops/history", response_model=RetrainingHistoryResponse)
+def get_mlops_retraining_history(
+    limit: int = Query(15, ge=1, le=100, description="Max history records to return")
+):
+    """
+    Retrieve audit history of model retrainings, champion-challenger comparisons, and deployment decisions.
+    """
+    try:
+        history_rows = get_retraining_history(limit=limit)
+        items = [RetrainingHistoryItem(**h) for h in history_rows]
+        return RetrainingHistoryResponse(history=items, total_count=len(items))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch retraining history: {str(e)}")
+
 
 

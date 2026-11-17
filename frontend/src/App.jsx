@@ -196,6 +196,7 @@ export default function App() {
         onClose={() => setIsHealthModalOpen(false)}
         health={health}
         metadata={metadata}
+        currentState={selectedState}
       />
 
       {/* Prediction Ledger & Verification Audit Modal */}
