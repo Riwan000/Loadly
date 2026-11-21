@@ -12,22 +12,35 @@ from features import engineer_features
 
 def get_feature_importance(model, top_n=15, filter_weather_only=False):
     """
-    Extract feature importance from XGBoost model.
+    Extract feature importance from tree-based (XGBoost/RF) or linear (LinearRegression) models.
 
     Parameters:
-        model: Trained XGBoost model
+        model: Trained ML model (supports feature_importances_ or coef_)
         top_n (int): Number of top features to return
         filter_weather_only (bool): If True, only return weather-related features
 
     Returns:
-        dict: Dictionary with feature names as keys and importance scores as values
+        dict: Dictionary with feature names as keys and normalized importance scores as values
     """
-    if model is None or not hasattr(model, 'feature_importances_'):
+    if model is None:
+        return None
+
+    has_tree_imp = hasattr(model, 'feature_importances_')
+    has_linear_coef = hasattr(model, 'coef_')
+    if not has_tree_imp and not has_linear_coef:
         return None
 
     try:
-        feature_names = model.feature_names_in_
-        importances = model.feature_importances_
+        feature_names = getattr(model, 'feature_names_in_', None)
+        if feature_names is None:
+            return None
+
+        if has_tree_imp:
+            importances = np.asarray(model.feature_importances_, dtype=float)
+        else:
+            raw_coefs = np.abs(np.asarray(model.coef_, dtype=float).ravel())
+            total = float(np.sum(raw_coefs))
+            importances = raw_coefs / total if total > 0 else raw_coefs
 
         importance_dict = {str(k): float(v) for k, v in zip(feature_names, importances)}
 

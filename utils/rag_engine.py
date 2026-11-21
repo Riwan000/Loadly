@@ -99,7 +99,81 @@ def _format_forecast_context(forecast_summary: Optional[Dict]) -> str:
     if extreme_heat:
         lines.append(f"- Extreme heat dates: {', '.join(extreme_heat)}")
 
+    regional = forecast_summary.get('regional_breakdown')
+    if regional:
+        reg_parts = [f"{k.upper()}: {v} MU" for k, v in regional.items()]
+        lines.append(f"- Regional breakdown (avg/day): {', '.join(reg_parts)}")
+
+    top_drivers = forecast_summary.get('top_driver_states')
+    if top_drivers:
+        driver_parts = [f"{d['state']} ({d['avg_mu']} MU)" for d in top_drivers[:5]]
+        lines.append(f"- Top driver states: {', '.join(driver_parts)}")
+
+    drift = forecast_summary.get('drift_telemetry')
+    if drift:
+        m = drift.get('metrics', {})
+        lines.append(
+            f"- Live MLOps Drift Status ({drift.get('scope', state)}): {drift.get('status', 'UNKNOWN')} | "
+            f"Trailing MAPE: {m.get('mape_pct', 'N/A')}% (baseline {m.get('baseline_mape_pct', 1.68)}%) | "
+            f"Mean Bias: {m.get('mean_bias_mu', 'N/A')} MU (z={m.get('bias_z_score', 0.0)}) | "
+            f"90% CI Coverage: {m.get('ci_coverage_pct', 'N/A')}% | Samples: {drift.get('sample_count', 0)}"
+        )
+
     return '\n'.join(lines)
+
+
+DEFAULT_FALLBACK_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+]
+
+
+def _get_model_candidates(preferred_model: Optional[str] = None) -> List[str]:
+    """Build ordered, deduplicated list of OpenRouter model IDs to try."""
+    env_model = os.getenv("OPENROUTER_MODEL", "").strip()
+    raw = [m for m in [preferred_model, env_model, *DEFAULT_FALLBACK_MODELS] if m]
+    seen = set()
+    candidates = []
+    for m in raw:
+        if m not in seen:
+            seen.add(m)
+            candidates.append(m)
+    return candidates
+
+
+def _synthesize_grounded_fallback(
+    user_query: str,
+    forecast_context: Optional[Dict],
+    contexts: List[Dict],
+    current_state: Optional[str] = None,
+) -> str:
+    """
+    Deterministic, grounded response synthesizer used when the external LLM API
+    is unavailable (missing API key, rate-limited, or network error).
+    Reports exact numbers from the active forecast, live MLOps telemetry,
+    and top retrieved knowledge-base snippets without hallucination.
+    """
+    sections = []
+    scope = current_state or (forecast_context.get('state') if forecast_context else None) or "India"
+    sections.append(f"**Grounded Summary for {scope}** *(generated directly from live telemetry & knowledge base)*:")
+
+    if forecast_context:
+        fc_text = _format_forecast_context(forecast_context)
+        sections.append(f"**Active Forecast & Telemetry:**\n{fc_text}")
+
+    if contexts:
+        top_snippets = "\n".join(f"- {ctx['text']}" for ctx in contexts[:2])
+        sections.append(f"**Relevant Knowledge Base Findings:**\n{top_snippets}")
+
+    if not forecast_context and not contexts:
+        return (
+            "I don't have enough grounded data to answer this question right now. "
+            "Please select a state in the **Demand Forecast** tab and try again."
+        )
+
+    return "\n\n".join(sections)
 
 
 def is_query_in_scope(query: str) -> bool:
@@ -125,19 +199,19 @@ def is_query_in_scope(query: str) -> bool:
     return True
 
 
-def call_openrouter_llm(messages: List[Dict], model: str = "nvidia/nemotron-nano-9b-v2:free") -> str:
+def call_openrouter_llm(messages: List[Dict], model: Optional[str] = None) -> str:
     """
-    Call OpenRouter API for LLM completion.
+    Call OpenRouter API for LLM completion with automatic multi-model fallback.
     
     Parameters:
         messages: List of message dictionaries with 'role' and 'content'
-        model: Model identifier for OpenRouter
+        model: Optional preferred model identifier for OpenRouter
         
     Returns:
         Generated response text
         
     Raises:
-        ValueError: If API key is not set or API call fails
+        ValueError: If API key is not set or all candidate models fail
     """
     api_key = get_openrouter_api_key()
     if not api_key:
@@ -155,28 +229,38 @@ def call_openrouter_llm(messages: List[Dict], model: str = "nvidia/nemotron-nano
         "X-Title": "Loadly - Smart Energy Forecasting Platform"
     }
 
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 1000
-    }
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if "choices" not in data or len(data["choices"]) == 0:
-            raise ValueError(f"Unexpected API response format: {data}")
-        
-        return data["choices"][0]["message"]["content"]
-        
-    except requests.exceptions.RequestException as e:
-        raise ValueError(f"Failed to call OpenRouter API: {str(e)}")
-    except (KeyError, ValueError) as e:
-        raise ValueError(f"Error parsing LLM response: {str(e)}")
+    last_error = None
+    for candidate_model in _get_model_candidates(model):
+        payload = {
+            "model": candidate_model,
+            "messages": messages,
+            "temperature": 0.4,
+            "max_tokens": 1000
+        }
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code in (404, 429, 500, 502, 503, 504):
+                last_error = f"HTTP {response.status_code} on {candidate_model}"
+                continue
+            response.raise_for_status()
+
+            data = response.json()
+            if "choices" not in data or len(data["choices"]) == 0:
+                last_error = f"Unexpected API response format from {candidate_model}"
+                continue
+
+            content = data["choices"][0]["message"].get("content", "")
+            if content:
+                return content
+            last_error = f"Empty response from {candidate_model}"
+        except requests.exceptions.RequestException as e:
+            last_error = f"{candidate_model}: {str(e)}"
+            continue
+        except (KeyError, ValueError) as e:
+            last_error = f"{candidate_model}: {str(e)}"
+            continue
+
+    raise ValueError(f"Failed to call OpenRouter API across candidate models ({last_error})")
 
 
 def stream_openrouter_llm(
@@ -312,7 +396,8 @@ class RAGEngine:
         forecast_context: Optional[Dict] = None,
         top_k: int = 5,
         min_similarity: float = 0.3,  # Low threshold to tolerate typos in queries
-        model: str = "meta-llama/llama-3.1-8b-instruct:free"
+        model: Optional[str] = None,
+        chat_history: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[Dict], float]:
         """
         Process a user query and generate a grounded response.
@@ -324,7 +409,8 @@ class RAGEngine:
             forecast_context: Optional forecast_summary dict injected directly into prompt
             top_k: Number of documents to retrieve
             min_similarity: Minimum similarity threshold for retrieval
-            model: LLM model identifier for OpenRouter
+            model: Optional LLM model identifier for OpenRouter
+            chat_history: Optional list of prior conversation turns [{role, content}, ...]
 
         Returns:
             Tuple of (response_text, retrieved_contexts, avg_similarity)
@@ -339,25 +425,26 @@ class RAGEngine:
                 0.0
             )
 
-        # Embed query
+        # Embed query & search vector store
+        results = []
         try:
             query_embedding = get_embeddings([user_query])[0]
-        except Exception as e:
-            return (
-                f"Error processing query: {str(e)}",
-                [],
-                0.0
+            state_filter = None if (current_state and current_state.lower() in ("all-india", "national")) else current_state
+            results = self.vector_store.search(
+                query_embedding,
+                k=top_k,
+                min_similarity=min_similarity,
+                state_filter=state_filter,
             )
+        except Exception as e:
+            if not forecast_context:
+                return (
+                    f"Error processing query: {str(e)}",
+                    [],
+                    0.0
+                )
 
-        # Search vector store (filtered to current state + generic docs)
-        results = self.vector_store.search(
-            query_embedding,
-            k=top_k,
-            min_similarity=min_similarity,
-            state_filter=current_state,
-        )
-
-        if not results:
+        if not results and forecast_context is None:
             return (
                 "I don't have forecast data to answer this yet. "
                 "Please go to the **Demand Forecast** tab, run a forecast for your state and horizon, "
@@ -383,7 +470,7 @@ class RAGEngine:
         context_text = "\n\n".join([
             f"[Context {i+1}]: {ctx['text']}"
             for i, ctx in enumerate(contexts)
-        ])
+        ]) if contexts else "No additional static documents matched."
 
         # Build prompt
         prompt = self.prompt_template.format(
@@ -394,19 +481,25 @@ class RAGEngine:
             user_query=user_query,
         )
 
-        # Call LLM
-        messages = [
-            {"role": "system", "content": "You are a helpful AI assistant for electricity demand forecasting."},
-            {"role": "user", "content": prompt}
+        # Build messages: system + last 4 history turns + current grounded prompt
+        messages: List[Dict] = [
+            {"role": "system", "content": "You are a helpful AI assistant for electricity demand forecasting in India."}
         ]
+        if chat_history:
+            for turn in chat_history[-4:]:
+                if isinstance(turn, dict) and turn.get("role") in ("user", "assistant") and turn.get("content"):
+                    messages.append({"role": turn["role"], "content": str(turn["content"])})
+        messages.append({"role": "user", "content": prompt})
 
         try:
             response = call_openrouter_llm(messages, model=model)
-        except Exception as e:
-            return (
-                f"Error generating response: {str(e)}",
-                contexts,
-                avg_similarity
+        except Exception:
+            # Graceful deterministic grounded fallback so the user always gets exact data
+            response = _synthesize_grounded_fallback(
+                user_query=user_query,
+                forecast_context=forecast_context,
+                contexts=contexts,
+                current_state=current_state,
             )
 
         return response, contexts, avg_similarity

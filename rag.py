@@ -2,7 +2,8 @@
 # RAG FUNCTIONS
 # ============================================================================
 import os
-import streamlit as st
+import threading
+import logging
 
 from models import load_model
 from visualization import get_feature_importance
@@ -12,9 +13,30 @@ from utils.rag_builder import (
     load_model_metadata as load_model_metadata_rag,
     build_model_metrics_documents,
     build_feature_importance_documents,
-    build_forecast_summary_documents
+    build_forecast_summary_documents,
+    build_platform_knowledge_documents,
 )
 from utils.rag_engine import RAGEngine
+
+logger = logging.getLogger(__name__)
+
+_rag_lock = threading.Lock()
+_rag_cache = {
+    "vector_store": None,
+    "rag_engine": None,
+    "metadata_mtime": None,
+}
+_METADATA_PATH = "artifacts/model_metadata.json"
+_RAG_INDEX_DIR = "data/rag_index"
+_RAG_INDEX_PATH = os.path.join(_RAG_INDEX_DIR, "knowledge_base.index")
+
+
+def invalidate_rag_cache() -> None:
+    """Clear the cached RAG vector store and engine (e.g., after model retraining)."""
+    with _rag_lock:
+        _rag_cache["vector_store"] = None
+        _rag_cache["rag_engine"] = None
+        _rag_cache["metadata_mtime"] = None
 
 
 def generate_forecast_summary(results_df, state, horizon_days, df_features=None, metadata=None):
@@ -77,60 +99,87 @@ def generate_forecast_summary(results_df, state, horizon_days, df_features=None,
     return summary
 
 
-@st.cache_resource
-def initialize_rag_system():
+def _get_metadata_mtime():
+    return os.path.getmtime(_METADATA_PATH) if os.path.exists(_METADATA_PATH) else None
+
+
+def initialize_rag_system(force_rebuild: bool = False):
     """
-    Initialize RAG system with knowledge base.
-    Creates vector store and loads initial knowledge documents.
+    Initialize and cache the RAG system with a thread-safe singleton.
+    Automatically rebuilds the vector index if artifacts/model_metadata.json
+    has been updated (e.g., after MLOps adaptive retraining).
 
     Returns:
         Tuple of (VectorStore, RAGEngine) or (None, None) if initialization fails
     """
-    try:
-        rag_index_dir = "data/rag_index"
-        os.makedirs(rag_index_dir, exist_ok=True)
-        index_path = os.path.join(rag_index_dir, "knowledge_base.index")
+    current_mtime = _get_metadata_mtime()
 
-        vector_store = VectorStore(dimension=384, index_path=index_path)
-
-        if vector_store.get_size() > 0:
-            rag_engine = RAGEngine(vector_store)
-            return vector_store, rag_engine
+    with _rag_lock:
+        if (
+            not force_rebuild
+            and _rag_cache["rag_engine"] is not None
+            and _rag_cache["metadata_mtime"] == current_mtime
+        ):
+            return _rag_cache["vector_store"], _rag_cache["rag_engine"]
 
         try:
-            metadata = load_model_metadata_rag("artifacts/model_metadata.json")
-            model_metrics_docs = build_model_metrics_documents(metadata)
+            os.makedirs(_RAG_INDEX_DIR, exist_ok=True)
+            index_exists = os.path.exists(_RAG_INDEX_PATH)
+            index_mtime = os.path.getmtime(_RAG_INDEX_PATH) if index_exists else None
 
-            model = load_model()
-            if model:
-                feature_importance = get_feature_importance(model, top_n=15)
-                if feature_importance:
-                    feature_docs = build_feature_importance_documents(feature_importance)
-                    model_metrics_docs.extend(feature_docs)
+            # Rebuild if forced, missing, or stale relative to model_metadata.json
+            needs_rebuild = (
+                force_rebuild
+                or not index_exists
+                or (current_mtime is not None and index_mtime is not None and current_mtime > index_mtime)
+            )
 
-            if model_metrics_docs:
-                texts = [doc['text'] for doc in model_metrics_docs]
-                metadata_list = [doc['metadata'] for doc in model_metrics_docs]
+            if not needs_rebuild:
+                vector_store = VectorStore(dimension=384, index_path=_RAG_INDEX_PATH)
+                if vector_store.get_size() > 0:
+                    rag_engine = RAGEngine(vector_store)
+                    _rag_cache["vector_store"] = vector_store
+                    _rag_cache["rag_engine"] = rag_engine
+                    _rag_cache["metadata_mtime"] = current_mtime
+                    return vector_store, rag_engine
 
+            # Fresh VectorStore build
+            vector_store = VectorStore(dimension=384, index_path=None)
+            vector_store.index_path = _RAG_INDEX_PATH
+
+            docs = build_platform_knowledge_documents()
+
+            try:
+                metadata = load_model_metadata_rag(_METADATA_PATH)
+                docs.extend(build_model_metrics_documents(metadata))
+
+                model = load_model()
+                if model is not None:
+                    feature_importance = get_feature_importance(model, top_n=15)
+                    if feature_importance:
+                        docs.extend(build_feature_importance_documents(feature_importance))
+            except FileNotFoundError:
+                logger.warning("[RAG] Model metadata file not found; indexing platform docs only.")
+            except Exception as e:
+                logger.warning(f"[RAG] Error building model docs: {e}")
+
+            if docs:
+                texts = [doc['text'] for doc in docs]
+                metadata_list = [doc['metadata'] for doc in docs]
                 try:
                     embeddings = get_embeddings(texts)
                     vector_store.add_documents(embeddings, texts, metadata_list)
                     vector_store.save_index()
                 except Exception as e:
-                    print(f"[RAG] Could not initialize embeddings: {e}")
+                    logger.error(f"[RAG] Could not initialize embeddings: {e}")
                     return None, None
 
             rag_engine = RAGEngine(vector_store)
+            _rag_cache["vector_store"] = vector_store
+            _rag_cache["rag_engine"] = rag_engine
+            _rag_cache["metadata_mtime"] = current_mtime
             return vector_store, rag_engine
 
-        except FileNotFoundError:
-            print("[RAG] Model metadata file not found. RAG system will work with forecast data only.")
-            rag_engine = RAGEngine(vector_store)
-            return vector_store, rag_engine
         except Exception as e:
-            print(f"[RAG] Error building knowledge base: {e}")
+            logger.error(f"[RAG] Error initializing RAG system: {e}")
             return None, None
-
-    except Exception as e:
-        print(f"[RAG] Error initializing RAG system: {e}")
-        return None, None

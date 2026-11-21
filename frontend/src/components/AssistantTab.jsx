@@ -3,14 +3,12 @@ import {
   Bot, 
   User, 
   Send, 
-  Sparkles, 
   Trash2, 
   FileText, 
   ChevronDown, 
   ChevronUp, 
   AlertCircle,
-  Lightbulb,
-  Zap
+  Lightbulb
 } from 'lucide-react';
 import { api } from '../services/api';
 
@@ -19,7 +17,7 @@ export default function AssistantTab({ state, horizonDays }) {
     {
       id: 'welcome',
       role: 'assistant',
-      content: `Hello! I am your AI Energy Assistant grounded with domain knowledge, machine learning model benchmarks, and weather analytics for Indian states. Ask me about electricity demand patterns, cooling load surges, extreme heat sensitivity, or model accuracy metrics.`,
+      content: `Hello! I am your AI Energy Assistant grounded with live demand forecasts, All-India regional analytics, MLOps drift telemetry, and model benchmarks. Ask me about peak demand, cooling load surges, state-level or national forecasts, or live verification accuracy.`,
       sources: []
     }
   ]);
@@ -93,7 +91,7 @@ export default function AssistantTab({ state, horizonDays }) {
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          content: `⚠️ Error: ${err.message || 'Failed to reach AI assistant service. Please check your backend and connection.'}`,
+          content: `Error: ${err.message || 'Failed to reach AI assistant service. Please check your backend and connection.'}`,
           sources: []
         }
       ]);

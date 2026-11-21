@@ -77,6 +77,101 @@ STATE_REGIONS = {
 
 _EASTERN_REGION_STATES = {"Bihar", "Chhattisgarh", "Jharkhand", "Odisha", "West Bengal"}
 
+# In-memory cache of the most recent forecast summary per (state, horizon) for grounded AI Assistant context
+_LATEST_FORECAST_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _cache_forecast_for_assistant(
+    state: str,
+    horizon_days: int,
+    summary: ForecastSummary,
+    timeline: List[ForecastTimelineItem],
+) -> None:
+    """Store locked forecast summary in memory so the AI Assistant can cite exact numbers."""
+    if not timeline:
+        return
+    demands = [t.forecasted_demand_mu for t in timeline]
+    p90 = float(np.percentile(demands, 90)) if demands else 0.0
+    high_risk_dates = [
+        t.date for t in timeline
+        if t.extreme_heat == 1 or t.forecasted_demand_mu >= p90
+    ]
+    extreme_heat_dates = [t.date for t in timeline if t.extreme_heat == 1]
+
+    ctx: Dict[str, Any] = {
+        "state": state,
+        "horizon_days": horizon_days,
+        "start_date": timeline[0].date,
+        "end_date": timeline[-1].date,
+        "avg_demand": summary.avg_daily_demand_mu,
+        "peak_demand": summary.peak_demand_mu,
+        "peak_date": summary.peak_demand_date,
+        "min_demand": summary.min_demand_mu,
+        "high_risk_days_count": summary.high_risk_days_count,
+        "high_risk_dates": high_risk_dates,
+        "extreme_heat_dates": extreme_heat_dates,
+        "rmse": summary.state_rmse,
+        "confidence_level": summary.confidence_level,
+    }
+    if summary.regional_breakdown:
+        ctx["regional_breakdown"] = summary.regional_breakdown
+    if summary.top_contributors:
+        ctx["top_driver_states"] = [
+            {"state": c.get("state"), "avg_mu": c.get("avg_mu")}
+            for c in summary.top_contributors
+        ]
+
+    _LATEST_FORECAST_CACHE[f"{state}:{horizon_days}"] = ctx
+    _LATEST_FORECAST_CACHE[f"{state}:latest"] = ctx
+
+
+def _build_assistant_forecast_context(state: Optional[str], horizon_days: int) -> Optional[Dict[str, Any]]:
+    """Retrieve locked forecast context (from cache or ledger) and enrich with live MLOps drift telemetry."""
+    target_state = state or "All-India"
+    ctx = None
+
+    cached = _LATEST_FORECAST_CACHE.get(f"{target_state}:{horizon_days}") or _LATEST_FORECAST_CACHE.get(f"{target_state}:latest")
+    if cached:
+        ctx = dict(cached)
+    else:
+        # Fallback: reconstruct latest forecast batch from Prediction Ledger without creating new rows
+        try:
+            ledger_rows = query_ledger(state=target_state, limit=max(horizon_days, 7), reconciled_only=False)
+            if ledger_rows:
+                latest_fid = ledger_rows[0]["forecast_id"]
+                batch = [r for r in ledger_rows if r["forecast_id"] == latest_fid]
+                batch.sort(key=lambda r: r["target_date"])
+                preds = [float(r["predicted_demand_mu"]) for r in batch]
+                peak_row = max(batch, key=lambda r: float(r["predicted_demand_mu"]))
+                extreme_dates = [r["target_date"] for r in batch if r.get("extreme_heat") == 1]
+                ctx = {
+                    "state": target_state,
+                    "horizon_days": len(batch),
+                    "start_date": batch[0]["target_date"],
+                    "end_date": batch[-1]["target_date"],
+                    "avg_demand": round(float(np.mean(preds)), 1),
+                    "peak_demand": round(float(peak_row["predicted_demand_mu"]), 1),
+                    "peak_date": peak_row["target_date"],
+                    "min_demand": round(float(np.min(preds)), 1),
+                    "high_risk_days_count": len(extreme_dates),
+                    "high_risk_dates": extreme_dates,
+                    "extreme_heat_dates": extreme_dates,
+                    "confidence_level": 0.9,
+                }
+        except Exception:
+            ctx = None
+
+    # Enrich with live MLOps drift & verification telemetry
+    try:
+        drift = compute_drift_metrics(state=target_state, window_days=14)
+        if ctx is None:
+            ctx = {"state": target_state, "horizon_days": horizon_days}
+        ctx["drift_telemetry"] = drift
+    except Exception:
+        pass
+
+    return ctx
+
 
 def to_serializable(obj: Any) -> Any:
     """Recursively convert numpy types and non-serializable objects to native Python types."""
@@ -310,6 +405,8 @@ def generate_forecast_endpoint(req: ForecastRequest):
         except Exception:
             pass
 
+        _cache_forecast_for_assistant("All-India", req.horizon_days, summary, timeline)
+
         return ForecastResponse(
             state="All-India",
             horizon_days=req.horizon_days,
@@ -408,6 +505,8 @@ def generate_forecast_endpoint(req: ForecastRequest):
         record_forecast_batch(timeline_dicts, req.state, model_name=model_name)
     except Exception as ledger_err:
         pass
+
+    _cache_forecast_for_assistant(req.state, req.horizon_days, summary, timeline)
 
     return ForecastResponse(
         state=req.state,
@@ -649,10 +748,18 @@ def assistant_chat_endpoint(req: ChatRequest):
                 is_out_of_scope=False
             )
 
+        forecast_context = _build_assistant_forecast_context(req.state, req.horizon_days)
+        history_list = [
+            (m.model_dump() if hasattr(m, "model_dump") else m.dict())
+            for m in (req.chat_history or [])
+        ]
+
         response_text, retrieved_docs, similarity = rag_engine.query(
             user_query=req.message,
             current_state=req.state,
-            forecast_horizon=req.horizon_days
+            forecast_horizon=req.horizon_days,
+            forecast_context=forecast_context,
+            chat_history=history_list,
         )
 
         sources = []
@@ -681,13 +788,22 @@ def assistant_chat_endpoint(req: ChatRequest):
 
 @router.get("/assistant/suggestions", response_model=SuggestionsResponse)
 def get_assistant_suggestions(state: Optional[str] = Query(None, examples=["Maharashtra"])):
-    """Get dynamic suggested prompt chips based on selected state."""
+    """Get dynamic suggested prompt chips based on selected state or All-India National scope."""
+    if state in (NATIONAL_STATE, "All-India", "National"):
+        suggestions = [
+            "What is the All-India peak demand forecast and regional breakdown?",
+            "Which states are the top electricity demand drivers nationally?",
+            "What is the current MLOps model drift status and verification MAPE?",
+            "How does Loadly compute All-India portfolio uncertainty and adaptive retraining?"
+        ]
+        return SuggestionsResponse(state="All-India", suggestions=suggestions)
+
     target_state = state if state in ALL_STATES else "Kerala"
     suggestions = [
+        f"What is the peak demand and risk outlook for {target_state}?",
         f"What are the primary drivers of electricity demand in {target_state}?",
-        f"How does extreme heat and CDD affect {target_state}'s cooling load?",
-        f"What is the model accuracy (RMSE) for {target_state}?",
-        "Explain how the Cooling Degree Days (CDD) feature is calculated."
+        f"What is the model accuracy (RMSE) and live drift status for {target_state}?",
+        "Explain how Cooling Degree Days (CDD) and extreme heat flags work."
     ]
     return SuggestionsResponse(state=target_state, suggestions=suggestions)
 
