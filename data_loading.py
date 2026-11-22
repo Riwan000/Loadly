@@ -433,3 +433,11 @@ def denormalize_predictions(predictions, dates, state_name, historical_demand=No
             return np.maximum(0.0, predictions_processed)
     else:
         return np.maximum(0.0, predictions_processed)
+
+
+def clear_data_caches():
+    """Drop cached demand/weather frames so freshly appended data is served (lru_cache or st.cache_data)."""
+    for fn in (load_historical_data, load_historical_demand, get_state_historical_averages):
+        clear = getattr(fn, "cache_clear", None) or getattr(fn, "clear", None)
+        if clear is not None:
+            clear()

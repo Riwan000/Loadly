@@ -4,9 +4,13 @@ from 2023-04-01 to 2024-04-28 into State_mu_1, State_mu_2, and re-run preprocess
 """
 
 import os
+import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import grid_region_code  # noqa: E402
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
@@ -19,22 +23,6 @@ STATE_MU_1_PATH = DATA_DIR / "State_mu" / "state_mu_1.csv"
 STATE_MU_2_PATH = DATA_DIR / "State_mu" / "state_mu_2.csv"
 LONG_STATE_MU2_PATH = DATA_DIR / "processed" / "long_state_mu2.csv"
 ZENODO_PATH = DATA_DIR / "zenodo_df.csv"
-
-STATE_TO_REGION = {
-    "Punjab": "NR", "Haryana": "NR", "Rajasthan": "NR", "Delhi": "NR",
-    "Uttar Pradesh": "NR", "Uttarakhand": "NR", "Himachal Pradesh": "NR",
-    "Jammu and Kashmir": "NR", "Chandigarh": "NR", "Railways_NR ISTS": "NR",
-    "Chhattisgarh": "WR", "Gujarat": "WR", "Madhya Pradesh": "WR",
-    "Maharashtra": "WR", "Goa": "WR", "Dadra and Nagar Haveli": "WR",
-    "Daman and Diu": "WR", "DNHDDPDCL": "WR", "AMNSIL": "WR", "BALCO": "WR",
-    "Andhra Pradesh": "SR", "Telangana": "SR", "Karnataka": "SR",
-    "Kerala": "SR", "Tamil Nadu": "SR", "Puducherry": "SR",
-    "Bihar": "ER", "Damodar Valley Corporation": "ER", "DVC": "ER",
-    "Jharkhand": "ER", "Odisha": "ER", "West Bengal": "ER", "Sikkim": "ER",
-    "Arunachal Pradesh": "NER", "Assam": "NER", "Manipur": "NER",
-    "Meghalaya": "NER", "Mizoram": "NER", "Nagaland": "NER", "Tripura": "NER",
-    "Andaman and Nicobar Islands": "SR", "Lakshadweep": "SR"
-}
 
 STATE_MAPPING = {
     'MP': 'Madhya Pradesh',
@@ -90,7 +78,7 @@ def ingest_demand_data():
     long_demand = long_demand.merge(long_unmet, on=['Date', 'States'], how='left')
 
     long_demand['date'] = long_demand['Date'].dt.strftime('%Y-%m-%d')
-    long_demand['Region'] = long_demand['States'].map(STATE_TO_REGION).fillna('NR')
+    long_demand['Region'] = long_demand['States'].map(lambda n: grid_region_code(n, default='NR'))
     long_demand['Shortage during maximum Demand(MW)'] = long_demand['Shortage during maximum Demand(MW)'].fillna(0.0)
 
     # Order columns matching state_mu_1

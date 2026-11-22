@@ -41,6 +41,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # Copy application source code and artifacts
 COPY api/ ./api/
 COPY artifacts/ ./artifacts/
+COPY data/daily_energy_met_MU.csv ./data/daily_energy_met_MU.csv
 COPY prompts/ ./prompts/
 COPY utils/ ./utils/
 COPY ui/ ./ui/

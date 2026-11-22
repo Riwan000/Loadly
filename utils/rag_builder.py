@@ -54,6 +54,7 @@ def build_model_metrics_documents(metadata: Dict) -> List[Dict]:
         f"MAE of {mae_str} MU, and R² of {r2_str}. "
         f"The model was trained on historical Indian grid data ({metadata.get('trained_on', '2013-2023')}). "
         f"Confidence interval level is set to {metadata.get('confidence_level', 0.9) * 100:.0f}%."
+        + (f" Error figures come from a {metadata['error_estimates_from']}." if metadata.get('error_estimates_from') else "")
     )
     documents.append({
         'text': overall_text,

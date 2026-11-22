@@ -8,7 +8,8 @@ __pycache__
 *.pyd
 .env
 .env.*
-data/
+data/*
+!data/daily_energy_met_MU.csv
 logs/
 notebooks/
 review/

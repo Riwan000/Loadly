@@ -154,3 +154,65 @@ def create_sample_data_with_temps(state, temps):
         'utci_mean': temps,
         'utci_max': [t + 5 for t in temps],
     })
+
+
+# ============================================================================
+# TEST ISOLATION: never touch production artifacts/ or the real prediction ledger
+# ============================================================================
+import shutil
+from utils import daily_update, model_retrainer, prediction_ledger
+
+_ARTIFACT_FILES_TO_SEED = ("best_model.pkl", "model_metadata.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_ledger_db(tmp_path, monkeypatch):
+    """Point the default prediction-ledger DB at a per-test temp file."""
+    monkeypatch.setattr(prediction_ledger, "DEFAULT_DB_PATH", tmp_path / "prediction_ledger.db")
+
+
+@pytest.fixture(autouse=True)
+def isolated_model_artifacts(tmp_path, monkeypatch):
+    """
+    Redirect retrain/rollback file paths to a temp dir seeded with a copy of the current
+    champion + metadata (so champion evaluation still works). The training dataset is
+    read-only and stays at its real location unless a test patches DATASET_PATH.
+    """
+    art_dir = tmp_path / "artifacts"
+    art_dir.mkdir()
+    for name in _ARTIFACT_FILES_TO_SEED:
+        src = model_retrainer.ARTIFACTS_DIR / name
+        if src.exists():
+            shutil.copy2(src, art_dir / name)
+
+    monkeypatch.setattr(model_retrainer, "MODEL_PATH", art_dir / "best_model.pkl")
+    monkeypatch.setattr(model_retrainer, "MODEL_PREV_PATH", art_dir / "best_model_prev.pkl")
+    monkeypatch.setattr(model_retrainer, "MODEL_CANDIDATE_PATH", art_dir / "best_model_candidate.pkl")
+    monkeypatch.setattr(model_retrainer, "METADATA_PATH", art_dir / "model_metadata.json")
+    monkeypatch.setattr(model_retrainer, "METADATA_PREV_PATH", art_dir / "model_metadata_prev.json")
+    monkeypatch.setattr(model_retrainer, "RETRAIN_LOCK_PATH", art_dir / "retrain.lock")
+    return art_dir
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_update(tmp_path, monkeypatch):
+    """Daily update job: default paths point at a temp tree (never data/ or logs/); scheduler stays off."""
+    root = tmp_path / "loadly_root"
+    monkeypatch.setattr(daily_update, "default_paths", lambda: daily_update.DataPaths.under(root))
+    monkeypatch.setattr(daily_update, "_last_signature", None)
+    monkeypatch.delenv("LOADLY_AUTO_UPDATE", raising=False)
+    monkeypatch.delenv("LOADLY_UPDATE_TIME", raising=False)
+    return root
+
+
+# ============================================================================
+# ADMIN AUTH: operator endpoints require X-Admin-Key (see api/auth.py)
+# ============================================================================
+TEST_ADMIN_KEY = "test-admin-key-0123456789abcdefghij"
+
+
+@pytest.fixture
+def admin_headers(monkeypatch):
+    """Configure a valid admin key for this test and return the matching request headers."""
+    monkeypatch.setenv("LOADLY_ADMIN_KEY", TEST_ADMIN_KEY)
+    return {"X-Admin-Key": TEST_ADMIN_KEY}

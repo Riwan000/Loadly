@@ -94,6 +94,9 @@ export default function ForecastTab({
       !w.toLowerCase().includes('diversified national portfolio')
   );
 
+  // Stale / missing demand-history notices from the API (shown in the same inline banner)
+  const bannerWarnings = [...operationalWarnings, ...(summary?.data_quality_warnings || [])];
+
   // Chart theme colors from THEME.md
   const isDark = theme === 'dark';
   const colors = {
@@ -256,9 +259,9 @@ export default function ForecastTab({
       </div>
 
       {/* Warnings & Domain Context */}
-      {operationalWarnings && operationalWarnings.length > 0 && (
+      {bannerWarnings.length > 0 && (
         <div className="space-y-2">
-          {operationalWarnings.map((warn, i) => (
+          {bannerWarnings.map((warn, i) => (
             <div 
               key={i} 
               className="px-4 py-3 rounded-none bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/50 text-amber-900 dark:text-amber-200 text-xs flex items-start gap-2.5"

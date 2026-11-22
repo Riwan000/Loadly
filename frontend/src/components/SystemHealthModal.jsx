@@ -5,6 +5,8 @@ import {
   TrendingUp, BarChart2, History, ChevronDown, ChevronUp, AlertCircle
 } from 'lucide-react';
 import { api } from '../services/api';
+import AdminKeyPrompt from './AdminKeyPrompt';
+import { useAdminKeyGate } from '../hooks/useAdminKeyGate';
 
 export default function SystemHealthModal({ isOpen, onClose, health, metadata, currentState = 'All-India' }) {
   const [driftReport, setDriftReport] = useState(null);
@@ -15,7 +17,15 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
   const [retrainResult, setRetrainResult] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [dataUpdate, setDataUpdate] = useState(null);
   const [selectedScope, setSelectedScope] = useState(currentState || 'All-India');
+  const adminGate = useAdminKeyGate();
+
+  // Drop any pending key prompt when the modal closes.
+  const { cancelPrompt } = adminGate;
+  useEffect(() => {
+    if (!isOpen) cancelPrompt();
+  }, [isOpen, cancelPrompt]);
 
   const isHealthy = health?.status === 'healthy';
 
@@ -26,6 +36,12 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
       loadHistory();
     }
   }, [isOpen, selectedScope]);
+
+  // Data freshness (read-only); a failure just hides the line.
+  useEffect(() => {
+    if (!isOpen) return;
+    api.getDataUpdateStatus().then(setDataUpdate).catch(() => setDataUpdate(null));
+  }, [isOpen]);
 
   const loadDriftData = async (scope) => {
     setLoadingDrift(true);
@@ -51,6 +67,7 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
   };
 
   const handleRetrain = async () => {
+    if (!adminGate.ensureKey(handleRetrain)) return;
     setRetraining(true);
     setActionError(null);
     setRetrainResult(null);
@@ -60,6 +77,7 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
       await loadDriftData(selectedScope);
       await loadHistory();
     } catch (err) {
+      if (adminGate.handleAuthError(err, handleRetrain)) return;
       setActionError(err.message || 'Model retraining failed.');
     } finally {
       setRetraining(false);
@@ -67,6 +85,7 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
   };
 
   const handleRollback = async () => {
+    if (!adminGate.ensureKey(handleRollback)) return;
     if (!window.confirm('Are you sure you want to roll back the production model to the previous champion weights?')) {
       return;
     }
@@ -81,6 +100,7 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
       await loadDriftData(selectedScope);
       await loadHistory();
     } catch (err) {
+      if (adminGate.handleAuthError(err, handleRollback)) return;
       setActionError(err.message || 'Rollback failed.');
     } finally {
       setRollingBack(false);
@@ -198,6 +218,23 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
               </p>
             </div>
           </div>
+
+          {/* Data freshness: last demand/weather dates and automated update status */}
+          {dataUpdate && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-executive-mutedLight dark:text-executive-mutedDark">
+              <Database className="w-3.5 h-3.5" />
+              <span>Latest demand data: <strong className="text-executive-textLight dark:text-executive-textDark">{dataUpdate.last_demand_date || '—'}</strong></span>
+              <span>Weather: <strong className="text-executive-textLight dark:text-executive-textDark">{dataUpdate.last_weather_date || '—'}</strong></span>
+              <span>
+                Auto-update: {dataUpdate.last_run_at
+                  ? `${dataUpdate.last_run_status === 'ok' ? 'OK' : (dataUpdate.last_run_status || 'unknown')} at ${new Date(dataUpdate.last_run_at).toLocaleString()}`
+                  : 'no run recorded'}
+                {dataUpdate.scheduler_enabled && dataUpdate.next_scheduled_run
+                  ? ` · next ${new Date(dataUpdate.next_scheduled_run).toLocaleString()}`
+                  : ''}
+              </span>
+            </div>
+          )}
 
           {/* ========================================================================= */}
           {/* MLOps Drift Detection & Adaptive Retraining Control Hub */}
@@ -329,6 +366,27 @@ export default function SystemHealthModal({ isOpen, onClose, health, metadata, c
                 </button>
               </div>
             </div>
+
+            {adminGate.prompt && (
+              <AdminKeyPrompt
+                message={adminGate.prompt.message}
+                onSubmit={adminGate.submitKey}
+                onCancel={adminGate.cancelPrompt}
+              />
+            )}
+
+            {adminGate.hasKey && !adminGate.prompt && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={adminGate.forgetKey}
+                  className="text-[11px] font-semibold text-executive-mutedLight dark:text-executive-mutedDark hover:underline"
+                  title="Remove the operator admin key from this browser tab"
+                >
+                  Forget admin key
+                </button>
+              </div>
+            )}
 
             {/* Retrain Result Card */}
             {retrainResult && (

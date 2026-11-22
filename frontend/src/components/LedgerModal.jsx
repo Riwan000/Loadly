@@ -13,6 +13,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { api } from '../services/api';
+import AdminKeyPrompt from './AdminKeyPrompt';
+import { useAdminKeyGate } from '../hooks/useAdminKeyGate';
 
 export default function LedgerModal({ isOpen, onClose, selectedState }) {
   const [metrics, setMetrics] = useState(null);
@@ -23,6 +25,13 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
   const [refreshing, setRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState(null);
+  const adminGate = useAdminKeyGate();
+
+  // Drop any pending key prompt when the modal closes.
+  const { cancelPrompt } = adminGate;
+  useEffect(() => {
+    if (!isOpen) cancelPrompt();
+  }, [isOpen, cancelPrompt]);
 
   const fetchLedgerData = async (stateParam, reconciledParam) => {
     setLoading(true);
@@ -46,14 +55,19 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
   };
 
   const handleSyncActuals = async () => {
+    if (!adminGate.ensureKey(handleSyncActuals)) return;
     setIsSyncing(true);
     setSyncToast(null);
     try {
       const res = await api.triggerIngestion({ catchupDays: 3 });
-      setSyncToast(`Sync complete! Reconciled ${res.reconciled_forecasts} forecasts across ${res.dates_processed?.length || 1} day(s).`);
+      setSyncToast({
+        text: `Sync complete! Reconciled ${res.reconciled_forecasts} forecasts across ${res.dates_processed?.length || 1} day(s).`,
+        isError: false
+      });
       await fetchLedgerData(filterState, reconciledOnly);
     } catch (err) {
-      setSyncToast(`Sync failed: ${err.message || 'Unknown error'}`);
+      if (adminGate.handleAuthError(err, handleSyncActuals)) return;
+      setSyncToast({ text: `Sync failed: ${err.message || 'Unknown error'}`, isError: true });
     } finally {
       setIsSyncing(false);
       setTimeout(() => setSyncToast(null), 5000);
@@ -253,8 +267,10 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
           </div>
           <div className="flex items-center gap-3">
             {syncToast && (
-              <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 animate-fadeIn">
-                {syncToast}
+              <span className={`text-[11px] font-semibold animate-fadeIn ${
+                syncToast.isError ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'
+              }`}>
+                {syncToast.text}
               </span>
             )}
             <span className="text-[11px] text-slate-400">
@@ -262,6 +278,16 @@ export default function LedgerModal({ isOpen, onClose, selectedState }) {
             </span>
           </div>
         </div>
+
+        {adminGate.prompt && (
+          <div className="px-6 pt-4">
+            <AdminKeyPrompt
+              message={adminGate.prompt.message}
+              onSubmit={adminGate.submitKey}
+              onCancel={adminGate.cancelPrompt}
+            />
+          </div>
+        )}
 
         {/* Records Table */}
         <div className="flex-1 overflow-y-auto p-6">

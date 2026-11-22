@@ -2,19 +2,23 @@
 API Routes for Electricity Demand Forecaster.
 """
 
+import logging
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 from scipy import stats
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from config import ALL_STATES, STATE_COORDINATES, NATIONAL_STATE
-from models import load_model, load_model_metadata, get_state_rmse
+from config import ALL_STATES, STATE_COORDINATES, NATIONAL_STATE, STATE_REGIONS, EASTERN_REGION_STATES
+from models import load_model, load_model_metadata, get_state_rmse, get_horizon_rmse, get_horizon_rmse_series
 from data_loading import load_historical_demand, load_historical_data, denormalize_predictions
 from weather import get_weather_forecast
-from features import prepare_features_for_prediction, engineer_features
+from features import (
+    predict_recursive, engineer_features, assess_demand_history, demand_history_warning,
+    DEMAND_STATUS_MISSING, DEMAND_STATUS_STALE,
+)
 from visualization import (
     get_feature_importance,
     categorize_feature,
@@ -32,9 +36,13 @@ from utils.prediction_ledger import (
     query_ledger
 )
 from utils.ingestion_worker import run_ingestion_pipeline
+from utils.daily_update import get_update_status, run_daily_update, start_background_update
 from utils.drift_detector import compute_drift_metrics
-from utils.model_retrainer import retrain_model, rollback_model, get_retraining_history
+from utils.model_retrainer import (
+    retrain_model, rollback_model, get_retraining_history, RetrainInProgressError
+)
 
+from api.auth import require_admin_key
 from api.schemas import (
     StatesResponse, StateItem,
     ModelMetadataResponse,
@@ -49,33 +57,19 @@ from api.schemas import (
     VerificationMetricsResponse,
     ActualDemandIngestRequest, ActualDemandIngestResponse,
     IngestionRunRequest, IngestionRunResponse,
+    DataUpdateStatusResponse, DataUpdateRequest, DataUpdateStartResponse,
     DriftStatusResponse, RetrainRequest, RetrainResponse,
     RollbackResponse, RetrainingHistoryResponse, RetrainingHistoryItem
 )
 
+logger = logging.getLogger(__name__)
+DEFAULT_STATE_RMSE_MU = 3.2  # last-resort 1-day RMSE for a state with no metadata entry
+
 router = APIRouter(prefix="/api", tags=["Forecasting Platform"])
 
-# Region mapping for Indian states
-STATE_REGIONS = {
-    # Northern Region (NR)
-    "Punjab": "nr", "Haryana": "nr", "Rajasthan": "nr", "Uttar Pradesh": "nr",
-    "Uttarakhand": "nr", "Himachal Pradesh": "nr", "Jammu and Kashmir": "nr",
-    "NCT of Delhi": "nr", "Chandigarh": "nr",
-    # Western Region (WR)
-    "Maharashtra": "wr", "Gujarat": "wr", "Madhya Pradesh": "wr", "Chhattisgarh": "wr",
-    "Goa": "wr", "Dadra and Nagar Haveli": "wr", "Daman and Diu": "wr",
-    # Southern Region (SR)
-    "Tamil Nadu": "sr", "Karnataka": "sr", "Andhra Pradesh": "sr",
-    "Telangana": "sr", "Kerala": "sr", "Puducherry": "sr", "Lakshadweep": "sr",
-    # Eastern Region (ER)
-    "Bihar": "er", "Odisha": "er", "West Bengal": "er", "Jharkhand": "er",
-    "Andaman and Nicobar": "er",
-    # North-Eastern Region (NER)
-    "Assam": "ner", "Sikkim": "ner", "Manipur": "ner", "Meghalaya": "ner",
-    "Mizoram": "ner", "Nagaland": "ner", "Tripura": "ner", "Arunachal Pradesh": "ner"
-}
-
-_EASTERN_REGION_STATES = {"Bihar", "Chhattisgarh", "Jharkhand", "Odisha", "West Bengal"}
+# State-changing operator endpoints (ledger actuals, ingestion, retrain, rollback) require
+# the X-Admin-Key header; see api/auth.py.
+ADMIN_DEPENDENCIES = [Depends(require_admin_key)]
 
 # In-memory cache of the most recent forecast summary per (state, horizon) for grounded AI Assistant context
 _LATEST_FORECAST_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -259,19 +253,28 @@ def generate_forecast_endpoint(req: ForecastRequest):
     # ------------------------------------------------------------------------
     if req.state in (NATIONAL_STATE, "All-India"):
         def _predict_single_state(st_name: str):
+            hist = load_historical_demand(st_name)
+            quality = assess_demand_history(hist, pd.Timestamp(start_date))
+            if quality.status == DEMAND_STATUS_MISSING:
+                # No history: a forecast would be a fake 0.0 MU; excluded from the sum instead.
+                return {"state": st_name, "excluded": True, "quality": quality}
+
             try:
                 wf = get_weather_forecast(st_name, start_date, req.horizon_days, use_api=req.use_weather_api)
             except Exception:
                 wf = get_weather_forecast(st_name, start_date, req.horizon_days, use_api=False)
 
+            used_fallback = False
             try:
-                X_f, df_feat = prepare_features_for_prediction(wf, st_name, model=model, metadata=metadata)
-                p_log = model.predict(X_f)
-                hist = load_historical_demand(st_name)
-                denorm = denormalize_predictions(p_log, wf['date'], st_name, hist, is_log_scale=False)
+                preds, df_feat = predict_recursive(
+                    model, wf, st_name, metadata=metadata, historical_demand=hist)
+                denorm = denormalize_predictions(preds, wf['date'], st_name, hist, is_log_scale=False)
             except Exception:
-                hist = load_historical_demand(st_name)
-                fallback_mean = float(hist.mean()) if hist is not None and len(hist) > 0 else 100.0
+                # Do not hide this: the state's forecast becomes a flat historical mean.
+                logger.exception("All-India forecast: model prediction failed for %s; "
+                                 "substituting historical mean.", st_name)
+                used_fallback = True
+                fallback_mean = float(hist['actual_demand_MU'].mean()) if hist is not None and len(hist) > 0 else 100.0
                 denorm = np.array([fallback_mean] * req.horizon_days)
                 df_feat = pd.DataFrame({
                     'cdd': [0.0] * req.horizon_days,
@@ -279,18 +282,35 @@ def generate_forecast_endpoint(req: ForecastRequest):
                     'is_holiday': [0] * req.horizon_days
                 })
 
-            rmse = get_state_rmse(st_name, metadata)
+            rmse_h = get_horizon_rmse_series(st_name, len(wf), metadata)
+            if rmse_h is None:
+                rmse_h = [DEFAULT_STATE_RMSE_MU] * len(wf)
             return {
                 "state": st_name,
                 "denorm": np.array(denorm),
                 "weather": wf,
                 "features": df_feat,
-                "rmse": float(rmse) if rmse is not None else 3.2,
+                "rmse_h": np.array(rmse_h, dtype=float),
+                "fallback": used_fallback,
+                "excluded": False,
+                "quality": quality,
                 "dates": [pd.to_datetime(d).strftime('%Y-%m-%d') for d in wf['date']]
             }
 
         with ThreadPoolExecutor(max_workers=12) as executor:
-            state_results = list(executor.map(_predict_single_state, ALL_STATES))
+            all_results = list(executor.map(_predict_single_state, ALL_STATES))
+
+        excluded_states = sorted(r["state"] for r in all_results if r["excluded"])
+        state_results = [r for r in all_results if not r["excluded"]]
+        stale_states = [r for r in state_results if r["quality"].status == DEMAND_STATUS_STALE]
+        data_quality_warnings: List[str] = []
+        if excluded_states:
+            data_quality_warnings.append(
+                "Excluded from the national total (no demand history): " + ", ".join(excluded_states) +
+                ". These are small union territories, so the omission is negligible at national scale."
+            )
+        for r in stale_states:
+            data_quality_warnings.append(demand_history_warning(r["state"], r["quality"]))
 
         dates = state_results[0]["dates"]
         num_days = min(len(dates), req.horizon_days)
@@ -299,9 +319,19 @@ def generate_forecast_endpoint(req: ForecastRequest):
         for r in state_results:
             national_demands += r["denorm"][:num_days]
 
-        portfolio_sigma = float(np.sqrt(sum(r["rmse"] ** 2 for r in state_results)))
+        fallback_states = sorted(r["state"] for r in state_results if r["fallback"])
+
+        # Per-day national sigma. Prefer the backtested national aggregate error
+        # (state errors are strongly correlated, so a root-sum-of-squares of state
+        # RMSEs understates it); otherwise fall back to that independence assumption.
+        if get_horizon_rmse("All-India", 1, metadata) is not None:
+            portfolio_sigma_h = np.array(
+                [get_horizon_rmse("All-India", h, metadata) for h in range(1, num_days + 1)], dtype=float)
+        else:
+            portfolio_sigma_h = np.sqrt(sum(r["rmse_h"][:num_days] ** 2 for r in state_results))
+        portfolio_sigma = float(portfolio_sigma_h[0])
         z_score = stats.norm.ppf((1 + confidence_level) / 2)
-        margin = z_score * portfolio_sigma
+        margin_h = z_score * portfolio_sigma_h
 
         timeline: List[ForecastTimelineItem] = []
         for i in range(num_days):
@@ -341,8 +371,8 @@ def generate_forecast_endpoint(req: ForecastRequest):
                     holiday_flag = 1
 
             reg_shares_rounded = {k: round(v, 2) for k, v in reg_shares.items()}
-            lower_b = max(0.0, day_total - margin)
-            upper_b = day_total + margin
+            lower_b = max(0.0, day_total - float(margin_h[i]))
+            upper_b = day_total + float(margin_h[i])
 
             timeline.append(ForecastTimelineItem(
                 date=dt_str,
@@ -390,14 +420,23 @@ def generate_forecast_endpoint(req: ForecastRequest):
             min_demand_mu=round(float(np.min(demands)), 2),
             high_risk_days_count=high_risk_count,
             state_rmse=round(portfolio_sigma, 2),
+            horizon_rmse_mu=[round(float(v), 2) for v in portfolio_sigma_h],
             confidence_level=confidence_level,
             is_national=True,
+            fallback_states=fallback_states or None,
             regional_breakdown=regional_avg_breakdown,
             top_contributors=top_contributors,
-            extreme_heat_states=extreme_heat_states
+            extreme_heat_states=extreme_heat_states,
+            data_quality_warnings=data_quality_warnings,
         )
 
         warnings = []
+        if fallback_states:
+            warnings.append(
+                "Model prediction failed for " + ", ".join(fallback_states) +
+                "; a flat historical mean was substituted for those states, so the national "
+                "total and interval are less reliable."
+            )
 
         try:
             timeline_dicts = [t.model_dump() if hasattr(t, "model_dump") else t.dict() for t in timeline]
@@ -419,6 +458,12 @@ def generate_forecast_endpoint(req: ForecastRequest):
     # ------------------------------------------------------------------------
     # Single State Forecasting
     # ------------------------------------------------------------------------
+    historical_demand = load_historical_demand(req.state)
+    quality = assess_demand_history(historical_demand, pd.Timestamp(start_date))
+    if quality.status == DEMAND_STATUS_MISSING:
+        raise HTTPException(status_code=422, detail=demand_history_warning(req.state, quality))
+    data_quality_warnings = [w for w in [demand_history_warning(req.state, quality)] if w]
+
     try:
         weather_forecast = get_weather_forecast(
             req.state,
@@ -426,31 +471,32 @@ def generate_forecast_endpoint(req: ForecastRequest):
             req.horizon_days,
             use_api=req.use_weather_api
         )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Weather API error: {str(e)}")
+    except Exception:
+        logger.exception("Weather forecast retrieval failed for %s", req.state)
+        raise HTTPException(status_code=502, detail="Weather data provider error. Please try again later.")
 
     if weather_forecast is None or len(weather_forecast) == 0:
         raise HTTPException(status_code=500, detail="Failed to retrieve weather data.")
 
     try:
-        X_forecast, df_features = prepare_features_for_prediction(
-            weather_forecast, req.state, model=model, metadata=metadata
+        preds, df_features = predict_recursive(
+            model, weather_forecast, req.state, metadata=metadata, historical_demand=historical_demand
         )
-        pred_log = model.predict(X_forecast)
-
-        historical_demand = load_historical_demand(req.state)
         denorm_result = denormalize_predictions(
-            pred_log, weather_forecast['date'], req.state, historical_demand, is_log_scale=False
+            preds, weather_forecast['date'], req.state, historical_demand, is_log_scale=False
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Forecasting calculation error: {str(e)}")
+    except Exception:
+        logger.exception("Forecast calculation failed for %s", req.state)
+        raise HTTPException(status_code=500, detail="Forecasting calculation error.")
 
     # Calculate Confidence Intervals
+    # Horizon-aware: day k uses the backtested k-day-ahead RMSE, not the 1-day RMSE.
     state_rmse = get_state_rmse(req.state, metadata)
+    rmse_h = get_horizon_rmse_series(req.state, len(denorm_result), metadata)
 
-    if state_rmse is not None:
+    if rmse_h is not None:
         z_score = stats.norm.ppf((1 + confidence_level) / 2)
-        margin = z_score * state_rmse
+        margin = z_score * np.array(rmse_h, dtype=float)
         upper_bound = denorm_result + margin
         lower_bound = np.maximum(0.0, denorm_result - margin)
     else:
@@ -488,12 +534,14 @@ def generate_forecast_endpoint(req: ForecastRequest):
         min_demand_mu=round(float(np.min(demands)), 2),
         high_risk_days_count=high_risk_count,
         state_rmse=round(float(state_rmse), 2) if state_rmse is not None else None,
-        confidence_level=confidence_level
+        horizon_rmse_mu=[round(float(v), 2) for v in rmse_h] if rmse_h is not None else None,
+        confidence_level=confidence_level,
+        data_quality_warnings=data_quality_warnings,
     )
 
     # Domain warnings
     warnings = []
-    if req.state in _EASTERN_REGION_STATES:
+    if req.state in EASTERN_REGION_STATES:
         warnings.append(
             f"{req.state} is in the Eastern Region (ER), which was not included as a separate "
             "region in the model's training data. Forecasts for this state are approximate."
@@ -605,14 +653,17 @@ def get_weather_impact_analytics(req: WeatherImpactRequest):
         if weather_df is None or len(weather_df) == 0:
             raise HTTPException(status_code=500, detail="Failed to fetch weather data for analysis.")
 
-        X_forecast, df_features = prepare_features_for_prediction(
-            weather_df, req.state, model=model, metadata=metadata
-        )
         if model:
-            pred_log = model.predict(X_forecast)
             historical_demand = load_historical_demand(req.state)
-            denorm_result = denormalize_predictions(pred_log, weather_df['date'], req.state, historical_demand)
+            quality = assess_demand_history(historical_demand, pd.Timestamp(start_date))
+            if quality.status == DEMAND_STATUS_MISSING:
+                raise HTTPException(status_code=422, detail=demand_history_warning(req.state, quality))
+            preds, df_features = predict_recursive(
+                model, weather_df, req.state, metadata=metadata, historical_demand=historical_demand
+            )
+            denorm_result = denormalize_predictions(preds, weather_df['date'], req.state, historical_demand)
         else:
+            df_features = engineer_features(weather_df, req.state, metadata=metadata)
             denorm_result = np.zeros(len(weather_df))
 
         results_df = pd.DataFrame({
@@ -778,9 +829,10 @@ def assistant_chat_endpoint(req: ChatRequest):
             is_out_of_scope=False
         )
 
-    except Exception as e:
+    except Exception:
+        logger.exception("AI Assistant query failed")
         return ChatResponse(
-            reply=f"AI Assistant encountered an issue: {str(e)}. Please check your OpenRouter API key or local embeddings.",
+            reply="AI Assistant encountered an internal issue. Please check your OpenRouter API key or local embeddings.",
             sources=[],
             is_out_of_scope=False
         )
@@ -865,7 +917,7 @@ def get_ledger_verification_metrics(
     return VerificationMetricsResponse(**metrics)
 
 
-@router.post("/ledger/actuals", response_model=ActualDemandIngestResponse)
+@router.post("/ledger/actuals", response_model=ActualDemandIngestResponse, dependencies=ADMIN_DEPENDENCIES)
 def ingest_actual_demands(req: ActualDemandIngestRequest):
     """
     Ingest ground-truth actual electricity demand for past dates and reconcile
@@ -879,7 +931,7 @@ def ingest_actual_demands(req: ActualDemandIngestRequest):
 # ============================================================================
 # 7. Automated Ingestion & Pipeline Triggers
 # ============================================================================
-@router.post("/ingestion/run", response_model=IngestionRunResponse)
+@router.post("/ingestion/run", response_model=IngestionRunResponse, dependencies=ADMIN_DEPENDENCIES)
 def trigger_continuous_ingestion(req: IngestionRunRequest):
     """
     Trigger the automated continuous ingestion worker to fetch ground-truth
@@ -897,13 +949,48 @@ def trigger_continuous_ingestion(req: IngestionRunRequest):
         return IngestionRunResponse(
             status=summary["status"],
             dates_processed=summary["dates_processed"],
+            dates_missing=summary.get("dates_missing", []),
             total_actuals_ingested=summary["total_actuals_ingested"],
             reconciled_forecasts=summary["reconciled_forecasts"],
             verification_metrics=summary.get("verification_metrics"),
             executed_at=summary["executed_at"]
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion worker failed: {str(e)}")
+    except Exception:
+        logger.exception("Ingestion worker failed")
+        raise HTTPException(status_code=500, detail="Ingestion worker failed.")
+
+
+# ============================================================================
+# 7b. Automated data update (demand + weather)
+# ============================================================================
+@router.get("/data/update-status", response_model=DataUpdateStatusResponse)
+def get_data_update_status():
+    """Public, read-only: last automated data update, next scheduled run, newest demand/weather dates."""
+    try:
+        return DataUpdateStatusResponse(**get_update_status())
+    except Exception:
+        logger.exception("Could not read data update status")
+        raise HTTPException(status_code=500, detail="Could not read data update status.")
+
+
+@router.post("/data/update", response_model=DataUpdateStartResponse,
+             status_code=status.HTTP_202_ACCEPTED, dependencies=ADMIN_DEPENDENCIES)
+def trigger_data_update(req: DataUpdateRequest):
+    """
+    Operator: start the daily data update in a background thread and return 202 at once.
+    409 when a run is already in progress (the file lock is taken here, before the thread
+    starts). Progress/result: GET /api/data/update-status ("running", "last_run_*").
+    """
+    catchup_days = req.catchup_days
+    try:
+        started = start_background_update(
+            lambda lock: run_daily_update(catchup_days=catchup_days, lock=lock))
+    except Exception:
+        logger.exception("Could not start data update")
+        raise HTTPException(status_code=500, detail="Data update failed.")
+    if not started:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A data update is already running.")
+    return DataUpdateStartResponse(status="started")
 
 
 # ============================================================================
@@ -921,11 +1008,12 @@ def get_model_drift_status(
     try:
         report = compute_drift_metrics(state=state, window_days=window_days)
         return DriftStatusResponse(**report)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to compute drift status: {str(e)}")
+    except Exception:
+        logger.exception("Drift status computation failed")
+        raise HTTPException(status_code=500, detail="Failed to compute drift status.")
 
 
-@router.post("/mlops/retrain", response_model=RetrainResponse)
+@router.post("/mlops/retrain", response_model=RetrainResponse, dependencies=ADMIN_DEPENDENCIES)
 def trigger_model_retraining(req: RetrainRequest):
     """
     Execute Champion vs Challenger retraining pipeline with validation gate and atomic zero-downtime deployment.
@@ -933,11 +1021,14 @@ def trigger_model_retraining(req: RetrainRequest):
     try:
         result = retrain_model(trigger_reason=req.trigger_reason, force=req.force)
         return RetrainResponse(**result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Retraining failed: {str(e)}")
+    except RetrainInProgressError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception:
+        logger.exception("Model retraining failed")
+        raise HTTPException(status_code=500, detail="Retraining failed.")
 
 
-@router.post("/mlops/rollback", response_model=RollbackResponse)
+@router.post("/mlops/rollback", response_model=RollbackResponse, dependencies=ADMIN_DEPENDENCIES)
 def trigger_model_rollback():
     """
     Roll back production model weights to previous champion version (best_model_prev.pkl).
@@ -945,10 +1036,14 @@ def trigger_model_rollback():
     try:
         result = rollback_model()
         return RollbackResponse(**result)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Rollback failed: {str(e)}")
+    except RetrainInProgressError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except FileNotFoundError:
+        logger.exception("Rollback target not found")
+        raise HTTPException(status_code=404, detail="No previous model version is available to roll back to.")
+    except Exception:
+        logger.exception("Model rollback failed")
+        raise HTTPException(status_code=500, detail="Rollback failed.")
 
 
 @router.get("/mlops/history", response_model=RetrainingHistoryResponse)
@@ -962,8 +1057,9 @@ def get_mlops_retraining_history(
         history_rows = get_retraining_history(limit=limit)
         items = [RetrainingHistoryItem(**h) for h in history_rows]
         return RetrainingHistoryResponse(history=items, total_count=len(items))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch retraining history: {str(e)}")
+    except Exception:
+        logger.exception("Failed to fetch retraining history")
+        raise HTTPException(status_code=500, detail="Failed to fetch retraining history.")
 
 
 

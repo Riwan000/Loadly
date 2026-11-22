@@ -156,7 +156,7 @@ def test_verification_metrics_calculation(temp_db_path):
     assert metrics["ci_coverage_pct"] == 100.0
 
 
-def test_api_ledger_endpoints():
+def test_api_ledger_endpoints(admin_headers):
     """Verify the FastAPI endpoints for ledger records, metrics, and actuals ingestion."""
     client = TestClient(app)
 
@@ -190,7 +190,7 @@ def test_api_ledger_endpoints():
             }
         ]
     }
-    ingest_res = client.post("/api/ledger/actuals", json=actuals_payload)
+    ingest_res = client.post("/api/ledger/actuals", json=actuals_payload, headers=admin_headers)
     assert ingest_res.status_code == 200
     assert ingest_res.json()["status"] == "success"
     assert ingest_res.json()["reconciled_count"] >= 1

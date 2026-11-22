@@ -12,13 +12,12 @@ from fastapi.testclient import TestClient
 
 from server import app
 from utils.drift_detector import calculate_psi, compute_drift_metrics
+from utils import model_retrainer
 from utils.model_retrainer import (
     init_retraining_table,
     get_retraining_history,
     retrain_model,
     rollback_model,
-    MODEL_PATH,
-    MODEL_PREV_PATH
 )
 from utils.prediction_ledger import init_ledger_db, get_db_connection
 
@@ -127,15 +126,15 @@ def test_retraining_and_rollback_flow(temp_db):
     assert len(history) >= 1
     assert history[0]["trigger_reason"] == "pytest_test"
 
-    # Test rollback
-    if MODEL_PREV_PATH.exists():
+    # Test rollback (paths are monkeypatched to tmp by conftest, so read them from the module)
+    if model_retrainer.MODEL_PREV_PATH.exists():
         rb = rollback_model(db_path=temp_db)
         assert rb["status"] == "SUCCESS"
         history_after_rb = get_retraining_history(limit=5, db_path=temp_db)
         assert history_after_rb[0]["decision"] == "ROLLED_BACK"
 
 
-def test_mlops_api_endpoints():
+def test_mlops_api_endpoints(admin_headers):
     client = TestClient(app)
 
     # 1. Test Drift Status Endpoint
@@ -154,8 +153,98 @@ def test_mlops_api_endpoints():
     assert "total_count" in data_hist
 
     # 3. Test Retrain Endpoint
-    res_retrain = client.post("/api/mlops/retrain", json={"trigger_reason": "api_test", "force": False})
+    res_retrain = client.post(
+        "/api/mlops/retrain", json={"trigger_reason": "api_test", "force": False}, headers=admin_headers
+    )
     assert res_retrain.status_code == 200
     data_retrain = res_retrain.json()
     assert data_retrain["decision"] in ("PROMOTED", "REJECTED")
     assert "challenger" in data_retrain
+
+
+# ---------------------------------------------------------------------------
+# Retrainer behaviours (isolated: paths are monkeypatched to tmp by conftest)
+# ---------------------------------------------------------------------------
+import json
+import pandas as pd
+
+
+def _write_tiny_dataset(path, drop_col=None):
+    """Small dataset with Total rows plus duplicate non-Total rows carrying garbage targets."""
+    rng = np.random.default_rng(0)
+    rows = []
+    # Span > 12 months so the rolling split leaves a non-empty train set.
+    for day in pd.date_range("2022-01-01", "2024-03-01", freq="D"):
+        for state in ("Kerala", "Goa"):
+            feats = {f: float(rng.normal(10, 1)) for f in model_retrainer.FEATURE_NAMES}
+            target = 5.0 * feats["demand_roll_mean_7"] + 3.0
+            rows.append({"date": day, "states": state, "source": "Total",
+                         "energy met (mu)": target, **feats})
+            rows.append({"date": day, "states": state, "source": "Coal",
+                         "energy met (mu)": 99999.0, **feats})
+    df = pd.DataFrame(rows)
+    if drop_col:
+        df = df.drop(columns=[drop_col])
+    df.to_csv(path, index=False)
+
+
+def test_retrain_raises_on_missing_feature_columns(tmp_path, monkeypatch, temp_db):
+    ds = tmp_path / "ds.csv"
+    _write_tiny_dataset(ds, drop_col="CDD")
+    monkeypatch.setattr(model_retrainer, "DATASET_PATH", ds)
+    with pytest.raises(ValueError, match="CDD"):
+        retrain_model(trigger_reason="t", db_path=temp_db)
+
+
+def test_retrain_uses_total_rows_and_preserves_unowned_metadata(tmp_path, monkeypatch, temp_db):
+    ds = tmp_path / "ds.csv"
+    _write_tiny_dataset(ds)
+    monkeypatch.setattr(model_retrainer, "DATASET_PATH", ds)
+    meta_path = model_retrainer.METADATA_PATH
+    meta_path.write_text(json.dumps({
+        "cdd_threshold_kelvin": 297.15,
+        "extreme_heat_threshold_kelvin": 305.0,
+        "horizon_rmse": {"1": 2.0},
+        "rmse": 123.0,
+    }))
+
+    result = retrain_model(trigger_reason="t", force=True, db_path=temp_db)
+
+    assert result["decision"] == "PROMOTED"
+    # Duplicate "Coal" rows (target 99999) would wreck RMSE if they were not filtered out.
+    assert result["challenger"]["rmse"] < 1.0
+    meta = json.loads(meta_path.read_text())
+    assert meta["cdd_threshold_kelvin"] == 297.15
+    assert meta["extreme_heat_threshold_kelvin"] == 305.0
+    # horizon_rmse is recomputed by the shared backtest on promotion (not left stale)
+    assert set(meta["horizon_rmse"]) == {str(h) for h in range(1, 31)}
+    assert "state_horizon_rmse" in meta and "baseline_horizon_rmse" in meta
+    # rolling split: test = last 12 months of the data (2024-03-01 minus 12 months)
+    assert meta["train_cutoff_date"] == "2023-03-02"
+    assert meta["rmse"] < 1.0  # owned key was updated
+    assert not list(meta_path.parent.glob("*.tmp"))
+
+
+def test_retrain_and_rollback_reject_concurrent_calls(temp_db, admin_headers):
+    assert model_retrainer._RETRAIN_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(model_retrainer.RetrainInProgressError):
+            retrain_model(trigger_reason="t", db_path=temp_db)
+        with pytest.raises(model_retrainer.RetrainInProgressError):
+            rollback_model(db_path=temp_db)
+        client = TestClient(app)
+        assert client.post(
+            "/api/mlops/retrain", json={"trigger_reason": "t", "force": False}, headers=admin_headers
+        ).status_code == 409
+        assert client.post("/api/mlops/rollback", headers=admin_headers).status_code == 409
+    finally:
+        model_retrainer._RETRAIN_LOCK.release()
+
+
+def test_rollback_restores_previous_model_in_tmp(isolated_model_artifacts, temp_db):
+    model_retrainer.MODEL_PATH.write_bytes(b"current")
+    model_retrainer.MODEL_PREV_PATH.write_bytes(b"previous")
+    result = rollback_model(db_path=temp_db)
+    assert result["status"] == "SUCCESS"
+    assert model_retrainer.MODEL_PATH.read_bytes() == b"previous"
+    assert (isolated_model_artifacts / "best_model_rolled_back.pkl").read_bytes() == b"current"

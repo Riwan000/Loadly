@@ -8,11 +8,13 @@ from datetime import datetime
 from scipy import stats
 import time
 
-from config import ALL_STATES
+from config import ALL_STATES, EASTERN_REGION_STATES
 from data_loading import load_historical_demand, denormalize_predictions
 from weather import get_weather_forecast
-from features import prepare_features_for_prediction
-from models import load_model_metadata, get_state_rmse
+from features import (
+    predict_recursive, assess_demand_history, demand_history_warning, DEMAND_STATUS_MISSING,
+)
+from models import load_model_metadata, get_state_rmse, get_horizon_rmse_series
 from rag import generate_forecast_summary
 
 
@@ -51,8 +53,7 @@ def render_forecast_tab(model, metadata, use_weather_api, health_monitor=None):
         st.write("")
         generate_btn = st.button("🚀 Generate Forecast", type="primary", use_container_width=True)
 
-    _EASTERN_REGION_STATES = {"Bihar", "Chhattisgarh", "Jharkhand", "Odisha", "West Bengal"}
-    if state in _EASTERN_REGION_STATES:
+    if state in EASTERN_REGION_STATES:
         st.warning(
             f"⚠️ **{state}** is in the Eastern Region (ER), which was not included as a "
             "separate region in the model's training data. Forecasts for this state are "
@@ -82,14 +83,19 @@ def render_forecast_tab(model, metadata, use_weather_api, health_monitor=None):
                     st.error("❌ Failed to get weather data. Please try again.")
                     st.stop()
 
-                X_forecast, df_features = prepare_features_for_prediction(
-                    weather_forecast, state, model=model, metadata=metadata
-                )
-
-                pred_log = model.predict(X_forecast)
-
                 historical_demand = load_historical_demand(state)
-                denorm_result = denormalize_predictions(pred_log, weather_forecast['date'], state, historical_demand)
+                quality = assess_demand_history(historical_demand, pd.Timestamp(start_date))
+                if quality.status == DEMAND_STATUS_MISSING:
+                    st.error(f"❌ {demand_history_warning(state, quality)}")
+                    st.stop()
+                quality_warning = demand_history_warning(state, quality)
+                if quality_warning:
+                    st.warning(f"⚠️ {quality_warning}")
+                # Recursive: each day's prediction feeds the next day's demand features.
+                preds, df_features = predict_recursive(
+                    model, weather_forecast, state, metadata=metadata, historical_demand=historical_demand
+                )
+                denorm_result = denormalize_predictions(preds, weather_forecast['date'], state, historical_demand)
 
                 results_df = pd.DataFrame({
                     'date': weather_forecast['date'],
@@ -167,12 +173,16 @@ def render_forecast_tab(model, metadata, use_weather_api, health_monitor=None):
                 state_rmse = get_state_rmse(state, metadata)
                 confidence_level = metadata.get('confidence_level', 0.9) if metadata else 0.9
 
-                if state_rmse is not None:
+                rmse_h = get_horizon_rmse_series(state, len(results_df), metadata)
+                if rmse_h is not None:
                     z_score = stats.norm.ppf((1 + confidence_level) / 2)
-                    margin = z_score * state_rmse
+                    margin = z_score * pd.Series(rmse_h, index=results_df.index)
                     upper_bound = results_df['forecasted_demand_MU'] + margin
-                    lower_bound = results_df['forecasted_demand_MU'] - margin
-                    st.caption(f"📊 Using state-specific RMSE: {state_rmse:.2f} MU (Confidence: {confidence_level*100:.0f}%)")
+                    lower_bound = (results_df['forecasted_demand_MU'] - margin).clip(lower=0)
+                    st.caption(
+                        f"📊 Horizon-aware error: RMSE grows from {rmse_h[0]:.2f} MU (day 1) to "
+                        f"{rmse_h[-1]:.2f} MU (day {len(rmse_h)}) (Confidence: {confidence_level*100:.0f}%)"
+                    )
                 else:
                     st.warning(f"⚠️ State-specific RMSE not found for {state} in metadata. Confidence intervals not displayed.")
                     upper_bound = None
@@ -180,7 +190,7 @@ def render_forecast_tab(model, metadata, use_weather_api, health_monitor=None):
 
                 fig = go.Figure()
 
-                if state_rmse is not None and upper_bound is not None:
+                if upper_bound is not None:
                     fig.add_trace(go.Scatter(
                         x=results_df['date'], y=upper_bound,
                         mode='lines', name=f'Upper Bound ({confidence_level*100:.0f}% CI)',

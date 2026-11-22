@@ -122,6 +122,78 @@ def get_state_rmse(state_name, metadata):
     return None
 
 
+NATIONAL_NAMES = ("All-India", "National")
+
+
+def _lookup_horizon(table, horizon):
+    """
+    Look up horizon `horizon` (1-based) in a {"1": rmse, ...} table.
+
+    Returns the running maximum over horizons <= `horizon`: forecast error grows with
+    lead time, so backtest noise must not let an interval narrow as the horizon grows.
+    Horizons beyond the table's last entry reuse the last (largest) value.
+    """
+    if not table:
+        return None
+    try:
+        points = sorted((int(k), float(v)) for k, v in table.items())
+    except (TypeError, ValueError):
+        return None
+    horizon = max(1, int(horizon))
+    usable = [v for h, v in points if h <= horizon] or [points[0][1]]
+    return max(usable)
+
+
+def _state_aliases(state_name):
+    if state_name == "Jammu and Kashmir":
+        return ("Jammu and Kashmir", "J&K")
+    if state_name == "J&K":
+        return ("J&K", "Jammu and Kashmir")
+    return (state_name,)
+
+
+def get_horizon_rmse(state_name, horizon, metadata):
+    """
+    Forecast RMSE (MU) for `state_name` at lead time `horizon` days (1 = next day).
+
+    Lookup order:
+      1. metadata["state_horizon_rmse"][state][horizon]  (state-specific backtest)
+      2. metadata["horizon_rmse"][horizon] scaled by state_rmse / horizon-1 overall RMSE
+      3. get_state_rmse(): the flat one-step RMSE (legacy behaviour)
+      4. None
+    "All-India"/"National" uses metadata["national_horizon_rmse"] when present;
+    callers otherwise combine per-state values themselves.
+    """
+    if not metadata:
+        return None
+
+    if state_name in NATIONAL_NAMES:
+        return _lookup_horizon(metadata.get("national_horizon_rmse"), horizon)
+
+    per_state = metadata.get("state_horizon_rmse") or {}
+    for alias in _state_aliases(state_name):
+        if alias in per_state:
+            value = _lookup_horizon(per_state[alias], horizon)
+            if value is not None:
+                return value
+
+    state_rmse = get_state_rmse(state_name, metadata)
+    overall_h = _lookup_horizon(metadata.get("horizon_rmse"), horizon)
+    overall_1 = _lookup_horizon(metadata.get("horizon_rmse"), 1)
+    if state_rmse is not None and overall_h is not None and overall_1:
+        return overall_h * float(state_rmse) / overall_1
+
+    return state_rmse
+
+
+def get_horizon_rmse_series(state_name, n_days, metadata):
+    """List of get_horizon_rmse for horizons 1..n_days, or None if any is unavailable."""
+    values = [get_horizon_rmse(state_name, h, metadata) for h in range(1, n_days + 1)]
+    if any(v is None for v in values):
+        return None
+    return values
+
+
 def reload_model_cache():
     """Clear memory caches for model and model metadata for zero-downtime hot reload."""
     if hasattr(load_model, "cache_clear"):

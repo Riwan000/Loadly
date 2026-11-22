@@ -58,3 +58,63 @@ ALL_STATES = [
 
 NATIONAL_STATE = "All-India"
 
+# A state whose latest demand observation is more than this many days before the
+# forecast start is flagged as stale (the recursive forecast is seeded from it).
+STALE_DEMAND_DAYS = 30
+
+# ---------------------------------------------------------------------------
+# Canonical state -> grid region map (single source of truth).
+# Regions follow the Indian power-grid regions: nr, wr, sr, er, ner.
+# Chhattisgarh is Western (wr); Sikkim and Andaman and Nicobar are Eastern (er).
+# Everything that needs a region (API summaries, UI warnings, legacy feature
+# encoding in features.py) must derive from this map.
+# ---------------------------------------------------------------------------
+STATE_REGIONS = {
+    # Northern Region
+    "Punjab": "nr", "Haryana": "nr", "Rajasthan": "nr", "Uttar Pradesh": "nr",
+    "Uttarakhand": "nr", "Himachal Pradesh": "nr", "Jammu and Kashmir": "nr",
+    "NCT of Delhi": "nr", "Chandigarh": "nr",
+    # Western Region
+    "Maharashtra": "wr", "Gujarat": "wr", "Madhya Pradesh": "wr", "Chhattisgarh": "wr",
+    "Goa": "wr", "Dadra and Nagar Haveli": "wr", "Daman and Diu": "wr",
+    # Southern Region
+    "Tamil Nadu": "sr", "Karnataka": "sr", "Andhra Pradesh": "sr",
+    "Telangana": "sr", "Kerala": "sr", "Puducherry": "sr", "Lakshadweep": "sr",
+    # Eastern Region
+    "Bihar": "er", "Odisha": "er", "West Bengal": "er", "Jharkhand": "er",
+    "Sikkim": "er", "Andaman and Nicobar": "er",
+    # North-Eastern Region
+    "Assam": "ner", "Manipur": "ner", "Meghalaya": "ner", "Mizoram": "ner",
+    "Nagaland": "ner", "Tripura": "ner", "Arunachal Pradesh": "ner",
+}
+
+EASTERN_REGION_STATES = frozenset(s for s, r in STATE_REGIONS.items() if r == "er")
+
+# Names used by the PSP / Zenodo ingestion sources that differ from the canonical
+# state names above. Only spelling variants; regions always come from STATE_REGIONS.
+STATE_NAME_ALIASES = {
+    "Delhi": "NCT of Delhi",
+    "Andaman and Nicobar Islands": "Andaman and Nicobar",
+    "Daman & Diu": "Daman and Diu",
+    "Dadra & Nagar Haveli": "Dadra and Nagar Haveli",
+    "DNHDDPDCL": "Dadra and Nagar Haveli",
+    "Jammu & Kashmir": "Jammu and Kashmir",
+}
+
+# Non-state grid entities that appear as rows in PSP reports (not forecastable
+# states, so they are not in STATE_REGIONS).
+NON_STATE_ENTITY_REGIONS = {
+    "Railways_NR ISTS": "nr",
+    "AMNSIL": "wr", "BALCO": "wr",
+    "Damodar Valley Corporation": "er", "DVC": "er",
+}
+
+
+def grid_region_code(name, default=None):
+    """Return the upper-case grid region code (NR/WR/SR/ER/NER) for a state or
+    grid-entity name as spelled by the ingestion sources, derived from
+    STATE_REGIONS. Returns `default` for unknown names."""
+    canonical = STATE_NAME_ALIASES.get(name, name)
+    region = STATE_REGIONS.get(canonical) or NON_STATE_ENTITY_REGIONS.get(canonical)
+    return region.upper() if region else default
+

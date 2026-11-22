@@ -18,6 +18,79 @@ async function handleResponse(res) {
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// Operator admin key
+// The key is entered by the operator at runtime and kept in sessionStorage only
+// (cleared when the tab closes). It must never be bundled or read from VITE_ env.
+// ---------------------------------------------------------------------------
+const ADMIN_KEY_STORAGE_KEY = 'loadly.adminKey';
+const ADMIN_KEY_HEADER = 'X-Admin-Key';
+
+export const ADMIN_ERROR = Object.freeze({
+  MISSING: 'missing',
+  UNAUTHORIZED: 'unauthorized',
+  DISABLED: 'disabled'
+});
+
+export class AdminAuthError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'AdminAuthError';
+    this.code = code;
+  }
+}
+
+// In-memory fallback for when sessionStorage is blocked; lost on page reload.
+let memoryAdminKey = '';
+
+export const adminKeyStore = {
+  get() {
+    try {
+      return window.sessionStorage.getItem(ADMIN_KEY_STORAGE_KEY) || memoryAdminKey;
+    } catch {
+      return memoryAdminKey;
+    }
+  },
+  set(key) {
+    memoryAdminKey = '';
+    try {
+      window.sessionStorage.setItem(ADMIN_KEY_STORAGE_KEY, key);
+    } catch {
+      memoryAdminKey = key;
+    }
+  },
+  clear() {
+    memoryAdminKey = '';
+    try {
+      window.sessionStorage.removeItem(ADMIN_KEY_STORAGE_KEY);
+    } catch {
+      // Storage unavailable: the in-memory copy above is already cleared.
+    }
+  }
+};
+
+async function adminFetch(path, { headers = {}, ...options } = {}) {
+  const key = adminKeyStore.get();
+  if (!key) {
+    throw new AdminAuthError('An operator admin key is required for this action.', ADMIN_ERROR.MISSING);
+  }
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: { ...headers, [ADMIN_KEY_HEADER]: key }
+  });
+  if (res.status === 401) {
+    adminKeyStore.clear();
+    throw new AdminAuthError('Admin key was rejected. Please re-enter it.', ADMIN_ERROR.UNAUTHORIZED);
+  }
+  if (res.status === 503) {
+    throw new AdminAuthError(
+      'Admin actions are disabled on this server (LOADLY_ADMIN_KEY is not configured).',
+      ADMIN_ERROR.DISABLED
+    );
+  }
+  return handleResponse(res);
+}
+
 export const api = {
   // Config & Metadata
   async getStates() {
@@ -101,6 +174,12 @@ export const api = {
     return handleResponse(res);
   },
 
+  // Automated data update status (public, read-only)
+  async getDataUpdateStatus() {
+    const res = await fetch(`${API_BASE_URL}/api/data/update-status`);
+    return handleResponse(res);
+  },
+
   // Prediction Ledger & Verification
   async getLedgerRecords({ state, limit = 50, reconciledOnly = false } = {}) {
     const params = new URLSearchParams();
@@ -120,16 +199,15 @@ export const api = {
   },
 
   async ingestActuals(records) {
-    const res = await fetch(`${API_BASE_URL}/api/ledger/actuals`, {
+    return adminFetch('/api/ledger/actuals', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ records })
     });
-    return handleResponse(res);
   },
 
   async triggerIngestion({ targetDate = null, catchupDays = 1 } = {}) {
-    const res = await fetch(`${API_BASE_URL}/api/ingestion/run`, {
+    return adminFetch('/api/ingestion/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -137,7 +215,6 @@ export const api = {
         catchup_days: catchupDays
       })
     });
-    return handleResponse(res);
   },
 
   // MLOps Drift Detection & Adaptive Retraining
@@ -150,7 +227,7 @@ export const api = {
   },
 
   async triggerRetrain({ triggerReason = 'manual_calibration', force = false } = {}) {
-    const res = await fetch(`${API_BASE_URL}/api/mlops/retrain`, {
+    return adminFetch('/api/mlops/retrain', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -158,15 +235,13 @@ export const api = {
         force
       })
     });
-    return handleResponse(res);
   },
 
   async triggerRollback() {
-    const res = await fetch(`${API_BASE_URL}/api/mlops/rollback`, {
+    return adminFetch('/api/mlops/rollback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
     });
-    return handleResponse(res);
   },
 
   async getRetrainingHistory({ limit = 15 } = {}) {

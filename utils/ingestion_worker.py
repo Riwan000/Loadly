@@ -1,7 +1,8 @@
 """
 Continuous Data Ingestion & Forecast Verification Worker for Loadly.
-Fetches ground-truth actual electricity demand (GRID-INDIA/NLDC) and realized weather
-to verify past predictions in the ledger and keep the 30-day lag feature store warm.
+Reads ground-truth actual electricity demand from the local historical grid CSV to
+verify past predictions in the ledger. Dates with no real data are skipped and reported;
+actuals are never estimated or synthesized.
 
 Usage:
     python utils/ingestion_worker.py                  # Ingest yesterday's actuals
@@ -17,17 +18,14 @@ import argparse
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor
-import requests
 import pandas as pd
-import numpy as np
 
 # Ensure root directory is in sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from config import ALL_STATES, STATE_COORDINATES
+from config import ALL_STATES
 from utils.prediction_ledger import record_actuals, get_verification_metrics, init_ledger_db
 
 logger = logging.getLogger(__name__)
@@ -36,11 +34,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 DEMAND_CACHE_PATH = ROOT_DIR / "data" / "daily_energy_met_MU.csv"
 CLIMATOLOGY_PATH = ROOT_DIR / "artifacts" / "climatology_reference.json"
 
-# Reusable session with connection pooling
-HTTP_SESSION = requests.Session()
-adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
-HTTP_SESSION.mount("https://", adapter)
-HTTP_SESSION.mount("http://", adapter)
+# A CSV row with fewer states than this is considered too sparse to be a real day of data.
+MIN_STATES_FOR_ACTUALS = 20
 
 STATE_SYNONYMS = {
     "Delhi": "NCT of Delhi",
@@ -69,168 +64,99 @@ def normalize_state_name(raw_name: str) -> str:
     return cleaned
 
 
-def fetch_realized_weather(state: str, target_date: date) -> Dict[str, Any]:
-    """
-    Fetch realized temperature and weather conditions from Open-Meteo Historical Archive.
-    Used to attribute whether prediction errors were model-driven or weather-driven.
-    """
-    coords = STATE_COORDINATES.get(state, {"lat": 20.5937, "lon": 78.9629})
-    date_str = target_date.strftime("%Y-%m-%d")
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": coords["lat"],
-        "longitude": coords["lon"],
-        "start_date": date_str,
-        "end_date": date_str,
-        "daily": "temperature_2m_mean,temperature_2m_max",
-        "timezone": "Asia/Kolkata"
-    }
+# Column used by earlier versions of this worker to persist synthetic national
+# aggregates into the demand CSV. Real source rows never carry it, so a row with a
+# value here is treated as fabricated and is never served as an actual.
+_SYNTHETIC_ROW_MARKER_COL = "All-India"
+# Genuine national total column shipped with the historical source data.
+_NATIONAL_TOTAL_COL = "Total"
 
-    try:
-        res = HTTP_SESSION.get(url, params=params, timeout=2.5)
-        if res.status_code == 200:
-            data = res.json()
-            daily = data.get("daily", {})
-            t_mean = daily.get("temperature_2m_mean", [None])[0]
-            t_max = daily.get("temperature_2m_max", [None])[0]
-            if t_mean is not None:
-                # Convert to Kelvin for CDD computation (297.15K base)
-                t_mean_k = t_mean + 273.15
-                cdd = max(0.0, t_mean_k - 297.15)
-                return {
-                    "temperature_mean_c": round(float(t_mean), 2),
-                    "temperature_max_c": round(float(t_max), 2) if t_max is not None else None,
-                    "cdd": round(float(cdd), 2),
-                    "source": "Open-Meteo Archive API"
-                }
-    except Exception as e:
-        logger.debug(f"Open-Meteo archive call skipped for {state}: {e}")
+_CSV_STATE_ALIASES = {
+    canonical: [raw for raw, canon in STATE_SYNONYMS.items() if canon == canonical]
+    for canonical in set(STATE_SYNONYMS.values())
+}
 
-    # Climatology reference fallback
-    return {
-        "temperature_mean_c": 28.0,
-        "temperature_max_c": 33.0,
-        "cdd": 3.85,
-        "source": "climatology_fallback"
-    }
+
+def _csv_state_value(row: "pd.Series", state: str) -> Optional[float]:
+    """First non-null value for `state` under its canonical name or known CSV aliases."""
+    for col in [state, *_CSV_STATE_ALIASES.get(state, [])]:
+        if col in row.index and pd.notna(row[col]):
+            return float(row[col])
+    return None
 
 
 def fetch_actual_grid_demand(target_date: date) -> List[Dict[str, Any]]:
     """
-    Fetch realized electricity consumption (MU) across all 36 Indian states for target_date.
-    Inspects available historical grid CSVs, POSOCO daily tables, or computes verified actuals.
+    Return realized electricity consumption (MU) for target_date from the local
+    historical grid CSV. This is the only source of actuals: if the date is not
+    there (or the row is untrustworthy) an empty list is returned and a warning is
+    logged. Demand is never estimated or synthesized.
+
+    The All-India record uses the CSV's genuine "Total" column. It is never a sum of
+    whatever states happen to be present, because real rows routinely lack some
+    states (e.g. Lakshadweep), which would understate the national figure.
     """
     date_str = target_date.strftime("%Y-%m-%d")
-    results = []
 
-    # 1. First check if target_date exists in local historical demand CSV
-    if DEMAND_CACHE_PATH.exists():
-        try:
-            df = pd.read_csv(DEMAND_CACHE_PATH)
-            date_col = "Date" if "Date" in df.columns else "date"
-            if date_col in df.columns:
-                df["dt_str"] = pd.to_datetime(df[date_col], errors="coerce").dt.strftime("%Y-%m-%d")
-                matching = df[df["dt_str"] == date_str]
-                if not matching.empty:
-                    row = matching.iloc[0]
-                    for state in ALL_STATES:
-                        col = state
-                        if col not in row and state == "NCT of Delhi":
-                            col = "Delhi"
-                        if col in row and pd.notna(row[col]):
-                            val = float(row[col])
-                            results.append({
-                                "state": state,
-                                "target_date": date_str,
-                                "actual_demand_mu": round(val, 2),
-                                "source": "historical_csv"
-                            })
-                    if len(results) >= 20:
-                        all_india_actual = sum(r["actual_demand_mu"] for r in results if r["state"] in ALL_STATES)
-                        results.append({
-                            "state": "All-India",
-                            "target_date": date_str,
-                            "actual_demand_mu": round(float(all_india_actual), 2),
-                            "source": "national_aggregate_csv"
-                        })
-                        return results
-        except Exception as e:
-            logger.debug(f"Cache lookup failed: {e}")
+    if not DEMAND_CACHE_PATH.exists():
+        logger.warning(f"No actual grid demand for {date_str}: {DEMAND_CACHE_PATH} not found.")
+        return []
 
-    # 2. Secondary/Operational calculation: Concurrent weather + baseline demand
-    from data_loading import get_fallback_baseline
-    np.random.seed(int(target_date.strftime("%Y%m%d")) % 100000)
+    try:
+        df = pd.read_csv(DEMAND_CACHE_PATH)
+    except Exception as e:
+        logger.warning(f"No actual grid demand for {date_str}: could not read demand CSV ({e}).")
+        return []
 
-    def _process_state(state):
-        base_demand = get_fallback_baseline(state)
-        weather_info = fetch_realized_weather(state, target_date)
-        cdd = weather_info.get("cdd", 3.0)
-        weather_surge = 1.0 + (cdd * 0.015)
-        noise = np.random.normal(0, 0.015)
-        actual_val = base_demand * weather_surge * (1.0 + noise)
-        return {
-            "state": state,
-            "target_date": date_str,
-            "actual_demand_mu": round(float(max(1.0, actual_val)), 2),
-            "source": "operational_grid_telemetry"
-        }
+    date_col = "Date" if "Date" in df.columns else "date"
+    if date_col not in df.columns:
+        logger.warning(f"No actual grid demand for {date_str}: demand CSV has no date column.")
+        return []
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(_process_state, ALL_STATES))
+    dt_str = pd.to_datetime(df[date_col], errors="coerce").dt.strftime("%Y-%m-%d")
+    matching = df[dt_str == date_str]
+    if matching.empty:
+        logger.warning(f"No actual grid demand available for {date_str}; skipping (nothing recorded).")
+        return []
 
-    if results:
-        all_india_actual = sum(r["actual_demand_mu"] for r in results if r["state"] in ALL_STATES)
+    row = matching.iloc[0]
+    if _SYNTHETIC_ROW_MARKER_COL in row.index and pd.notna(row[_SYNTHETIC_ROW_MARKER_COL]):
+        logger.warning(
+            f"Demand CSV row for {date_str} was written by the legacy synthetic ingestion path; "
+            "ignoring it as an actual."
+        )
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for state in ALL_STATES:
+        val = _csv_state_value(row, state)
+        if val is not None:
+            results.append({
+                "state": state,
+                "target_date": date_str,
+                "actual_demand_mu": round(val, 2),
+                "source": "historical_csv",
+            })
+
+    if len(results) < MIN_STATES_FOR_ACTUALS:
+        logger.warning(
+            f"Only {len(results)} states in CSV for {date_str} (< {MIN_STATES_FOR_ACTUALS}); "
+            "treating the date as having no actuals."
+        )
+        return []
+
+    total = row[_NATIONAL_TOTAL_COL] if _NATIONAL_TOTAL_COL in row.index else None
+    if total is not None and pd.notna(total):
         results.append({
             "state": "All-India",
             "target_date": date_str,
-            "actual_demand_mu": round(float(all_india_actual), 2),
-            "source": "national_aggregate_telemetry"
+            "actual_demand_mu": round(float(total), 2),
+            "source": "national_total_csv",
         })
+    else:
+        logger.warning(f"No national total for {date_str}; All-India actual not recorded.")
 
     return results
-
-
-def update_demand_cache(records: List[Dict[str, Any]]) -> int:
-    """
-    Append or update ingested actuals in data/daily_energy_met_MU.csv
-    to ensure the 30-day rolling feature buffer stays completely up to date.
-    """
-    if not records:
-        return 0
-
-    target_date = records[0]["target_date"]
-    new_row = {"Date": target_date}
-    for r in records:
-        new_row[r["state"]] = r["actual_demand_mu"]
-
-    try:
-        DEMAND_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if DEMAND_CACHE_PATH.exists():
-            df = pd.read_csv(DEMAND_CACHE_PATH)
-            date_col = "Date" if "Date" in df.columns else "date"
-            df["dt_str"] = pd.to_datetime(df[date_col], errors="coerce").dt.strftime("%Y-%m-%d")
-            
-            # Check if row already exists
-            if target_date in df["dt_str"].values:
-                # Update existing row
-                idx = df[df["dt_str"] == target_date].index[0]
-                for st, val in new_row.items():
-                    if st != "Date" and st in df.columns:
-                        df.at[idx, st] = val
-            else:
-                # Append new row
-                df = df.drop(columns=["dt_str"], errors="ignore")
-                new_df = pd.DataFrame([new_row])
-                df = pd.concat([df, new_df], ignore_index=True)
-            
-            df.drop(columns=["dt_str"], errors="ignore").to_csv(DEMAND_CACHE_PATH, index=False)
-        else:
-            df = pd.DataFrame([new_row])
-            df.to_csv(DEMAND_CACHE_PATH, index=False)
-        return len(records)
-    except Exception as e:
-        logger.warning(f"Could not update demand cache CSV: {e}")
-        return 0
 
 
 def run_ingestion_pipeline(
@@ -241,7 +167,7 @@ def run_ingestion_pipeline(
     Execute end-to-end continuous ingestion:
     1. For each target date, fetch state electricity actuals.
     2. Reconcile matching rows in prediction_ledger.db.
-    3. Update the rolling historical demand cache.
+    3. Dates with no real actuals are skipped and reported in `dates_missing`.
     4. Compute updated verification accuracy metrics (MAPE %, CI Hit Rate).
     """
     init_ledger_db()
@@ -251,12 +177,17 @@ def run_ingestion_pipeline(
     
     total_reconciled = 0
     all_ingested_records = []
+    dates_missing: List[str] = []
 
     for d in reversed(dates_to_process):
         date_str = d.strftime("%Y-%m-%d")
         logger.info(f"Ingesting grid verification actuals for {date_str}...")
-        
+
         actuals = fetch_actual_grid_demand(d)
+        if not actuals:
+            logger.warning(f" -> No real actuals for {date_str}; nothing reconciled or cached.")
+            dates_missing.append(date_str)
+            continue
         all_ingested_records.extend(actuals)
 
         # Reconcile Prediction Ledger
@@ -264,8 +195,7 @@ def run_ingestion_pipeline(
         total_reconciled += reconciled
         logger.info(f" -> Reconciled {reconciled} forecast records for {date_str}")
 
-        # Update warm demand cache
-        update_demand_cache(actuals)
+        # The demand CSV is the only actuals source; ingestion never writes to it.
 
     # Compute latest overall verification metrics
     metrics = get_verification_metrics(days_window=0)
@@ -274,6 +204,7 @@ def run_ingestion_pipeline(
         "status": "success",
         "dates_processed": [d.strftime("%Y-%m-%d") for d in dates_to_process],
         "states_per_day": len(ALL_STATES),
+        "dates_missing": dates_missing,
         "total_actuals_ingested": len(all_ingested_records),
         "reconciled_forecasts": total_reconciled,
         "verification_metrics": metrics,
@@ -307,6 +238,8 @@ def main():
 
     print("\n✅ Ingestion & Reconciliation Complete!")
     print(f"• Dates Processed:        {', '.join(summary['dates_processed'])}")
+    if summary["dates_missing"]:
+        print(f"• Dates With No Data:     {', '.join(summary['dates_missing'])}")
     print(f"• Total Actuals Ingested:  {summary['total_actuals_ingested']}")
     print(f"• Forecasts Reconciled:   {summary['reconciled_forecasts']}")
     print("-" * 65)

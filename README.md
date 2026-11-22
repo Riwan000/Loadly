@@ -69,8 +69,8 @@ flowchart TD
     end
 
     subgraph S3["Predictive Modeling Engines (artifacts/)"]
-        C1["Primary Best Model (Reduced LR)\n15 Core Features | R² = 0.99965 | MAE = 1.096 MU"]
-        C2["Ensemble Model (XGBoost Regressor)\n72 Features | Log1p Scale | R² = 0.99800 | MAE = 2.180 MU"]
+        C1["Primary Best Model (LR with demand lags)\n17 Features | held-out 1-day RMSE 9.1 MU, MAE 5.1 MU"]
+        C2["Legacy Model (XGBoost Regressor)\n72 Features | Log1p Scale (not served by default)"]
         C3["State Uncertainty Calibrator\nState-wise RMSE Matrix (34+ States)"]
     end
 
@@ -102,23 +102,32 @@ flowchart TD
 
 ## 📊 ML Models & Benchmarks
 
-Loadly maintains two complementary modeling approaches saved in `artifacts/`:
-1. **Primary Production Model (`best_model.pkl`)**: A **15-feature Reduced Linear Regression** model that optimizes for low latency, zero collinearity drift, and exceptional generalization across all states.
-2. **High-Dimensional Gradient Boosting Model (`xgb2_model.pkl`)**: An **XGBoost Regressor** trained on 72+ features using a $\log(1 + y)$ target transformation and historical cross-validation.
+Loadly keeps these models in `artifacts/`:
+1. **Primary Production Model (`best_model.pkl`)**: a **17-feature Linear Regression (`LR_lags`)**: the 15 rolling-demand / weather / calendar features plus direct demand lags `demand_lag_1` (y(t-1)) and `demand_lag_7` (y(t-7)). It is one-step-ahead; multi-day forecasts feed each prediction back into the demand features (`features.predict_recursive`).
+2. **Legacy Gradient Boosting Model (`xgb2_model.pkl`)**: an XGBoost Regressor on 72+ features with a $\log(1 + y)$ target, kept for reference.
 
-### Performance Comparison
+The previous 15-feature production model is preserved as `artifacts/best_model_pre_lag.pkl`.
 
-| Metric | Primary Model (`Reduced_LR`) | XGBoost Pipeline (`XGB2_Log`) | Benchmark Standard |
-| :--- | :---: | :---: | :--- |
-| **$R^2$ Score** | **0.99965** | **0.99800** | $\ge 0.950$ (PRD target) |
-| **MAE (Mean Absolute Error)** | **1.096 MU** | **2.180 MU** | Daily error across states |
-| **RMSE (Root Mean Squared Error)**| **2.628 MU** | **4.580 MU** | National test set |
-| **Input Feature Dimensionality** | **15 Features** | **72 Features** | Compact vs One-Hot |
-| **Inference Latency** | **< 2 ms** | **~ 12 ms** | Point prediction pass |
+### How the model is evaluated (and what the numbers mean)
 
-### The 15 Core Features of the Primary Model
+All figures below come from a **held-out, recursive 1..30-day backtest** on the last 12 months of data (2025-08-30 to 2026-08-29, 33 states, forecast origins every 5 days, actual weather, demand history only up to the origin). They are produced by the **train-only** fit; the deployed model is then refit on all data through 2026-08-29, so these are conservative estimates. A candidate is only deployed if it passes a promotion gate: it must beat persistence ("tomorrow = today") at h=1 and be no more than 2% worse than the better naive baseline (persistence or seasonal-naive) at h=7, 14 and 30.
 
-The primary model eliminates noisy high-dimensional sparse state dummies in favor of high-signal rolling demand and thermal indicators:
+**Pooled RMSE across states (MU):**
+
+| Horizon | Previous 15-feature LR | **Deployed `LR_lags`** | Persistence | Seasonal-naive |
+| :-: | :-: | :-: | :-: | :-: |
+| 1 day | 11.69 | **8.69** | 9.61 | 21.04 |
+| 7 days | 20.05 | **19.07** | 20.94 | 20.94 |
+| 14 days | 23.88 | **22.75** | 25.58 | 25.58 |
+| 30 days | 29.89 | **28.59** | 30.71 | 32.57 |
+
+One-step (teacher-forced) held-out accuracy of `LR_lags`: **RMSE 9.12 MU, MAE 5.14 MU, R² 0.9968**. For the same rows persistence scores RMSE 9.77 MU and XGBoost-with-lags 9.68 MU. National (sum of states) backtest RMSE at 1 / 7 / 14 / 30 days: 92 / 224 / 255 / 292 MU.
+
+**Honest limits:** the model beats persistence at 1 day in only **16 of 33 states** (all the large ones dominate the pooled number); for small states and UTs, where demand barely moves day to day, "repeat yesterday" is as good or better. At 7-30 days the gain over the better naive baseline is modest (about 9% at 7 days, 11% at 14 days, 7% at 30 days). Ridge (alpha chosen on forward-chaining validation) and XGBoost with the same features were evaluated and are not meaningfully better than plain least squares on the mean 1..30-day RMSE (22.56 vs 22.56 vs 22.55), so the simplest model is deployed.
+
+### The 17 Features of the Primary Model
+
+Rows 1-15 are the original feature set; 16-17 are the direct demand lags added to let the model reconstruct yesterday's level.
 
 | # | Feature Identifier | Category | Physical & Operational Meaning |
 | :-: | :--- | :--- | :--- |
@@ -134,9 +143,11 @@ The primary model eliminates noisy high-dimensional sparse state dummies in favo
 | 10 | `temperature_lag_1` | Weather Lag | Previous day's mean temperature (thermal inertia of buildings) |
 | 11 | `temp_range` | Weather Dynamics | Diurnal temperature swing ($T_{\max} - T_{\min}$) |
 | 12 | `CDD` | Thermal Stress | Cooling Degree Days: $\max(0, T_{\text{mean}} - 297.15\,\text{K})$ |
-| 13 | `month` | Calendar | Cyclical annual month indicator (1–12) |
+| 13 | `month` | Calendar | Cyclical annual month indicator (1-12) |
 | 14 | `day_of_week` | Calendar | Day index (Monday = 0 ... Sunday = 6) |
 | 15 | `is_weekend` | Calendar | Binary indicator for commercial/industrial weekend load reduction |
+| 16 | `demand_lag_1` | Demand History | Demand of the previous day, y(t-1) |
+| 17 | `demand_lag_7` | Demand History | Demand one week earlier, y(t-7) (same weekday) |
 
 ### State-Specific Uncertainty Modeling (90% Confidence Interval)
 
@@ -146,8 +157,21 @@ $$\text{Confidence Interval}_{90\%} = \hat{y}_t \pm \left(z_{0.90} \times \text{
 
 #### Representative State RMSE Benchmarks
 
-| State / UT | Daily Baseline | State RMSE | 90% Uncertainty Margin ($\pm\text{MU}$) |
-| :--- | :---: | :---: | :---: |
+Held-out 1-day (one-step) RMSE from `model_metadata.json` `state_rmse`, and the recursive-backtest RMSE at 1 and 7 days ahead (`state_horizon_rmse`):
+
+| State / UT | One-step RMSE | 1-day backtest RMSE | 7-day backtest RMSE | 90% margin at 7 days ($\pm\text{MU}$) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Sikkim** | 2.37 MU | 1.72 MU | 3.60 MU | $\pm 5.92$ |
+| **Chandigarh** | 2.75 MU | 2.46 MU | 4.36 MU | $\pm 7.17$ |
+| **Himachal Pradesh** | 2.66 MU | 2.34 MU | 4.72 MU | $\pm 7.76$ |
+| **Kerala** | 3.72 MU | 3.44 MU | 5.09 MU | $\pm 8.37$ |
+| **Bihar** | 8.02 MU | 9.00 MU | 14.39 MU | $\pm 23.67$ |
+| **Tamil Nadu** | 18.20 MU | 16.53 MU | 26.71 MU | $\pm 43.94$ |
+| **Uttar Pradesh** | 23.18 MU | 23.35 MU | 53.55 MU | $\pm 88.09$ |
+| **Gujarat** | 18.78 MU | 16.11 MU | 38.88 MU | $\pm 63.96$ |
+| **Maharashtra** | 16.12 MU | 17.02 MU | 31.96 MU | $\pm 52.57$ |
+
+--- | :---: | :---: | :---: |
 | **Sikkim** | ~ 10 MU | **0.025 MU** | $\pm 0.041\text{ MU}$ |
 | **Chandigarh** | ~ 8 MU | **0.115 MU** | $\pm 0.189\text{ MU}$ |
 | **Himachal Pradesh** | ~ 40 MU | **0.813 MU** | $\pm 1.337\text{ MU}$ |
@@ -252,7 +276,8 @@ Loadly/
 │   ├── routes.py                       # REST route controllers & business logic
 │   └── schemas.py                      # Pydantic v2 request/response contracts
 ├── artifacts/                          # Persisted models & offline reference tables
-│   ├── best_model.pkl                  # Primary model (15-feature Reduced Linear Regressor)
+│   ├── best_model.pkl                  # Primary model (17-feature Linear Regression with demand lags)
+│   ├── best_model_pre_lag.pkl          # Previous 15-feature champion (+ model_metadata_pre_lag.json)
 │   ├── xgb1_model.pkl                  # Full-featured baseline XGBoost model
 │   ├── xgb2_model.pkl                  # Production 72-feature XGBoost regressor (log-scale)
 │   ├── model_metadata.json             # State RMSE values, thresholds & metrics
@@ -303,9 +328,8 @@ Loadly/
 │   ├── forecast_tab.py                 # Streamlit forecast charts & schedule table
 │   └── weather_tab.py                  # Streamlit correlation & seasonal views
 ├── utils/                              # Data ingestion, health & vector store utilities
-│   ├── bridge_gap_2024_2025.py         # Pipeline to bridge historical demand gaps
 │   ├── embeddings.py                   # Local Sentence-Transformers & OpenRouter wrapper
-│   ├── extend_demand_sequence.py       # Sequential demand series synthesizer
+│   ├── fetch_psp_reports.py            # Downloads real Grid-India daily PSP reports into data/psp/
 │   ├── fetch_recent_weather.py         # Bulk weather collector from Open-Meteo
 │   ├── health_checks.py                # Health verification routines (Model, RAG, API)
 │   ├── health_monitor.py               # Singleton state tracker for system health
@@ -447,6 +471,47 @@ curl http://localhost:8000/api/health
 
 The container automatically serves the compiled SPA at `http://localhost:8000/` and REST APIs at `http://localhost:8000/api/`.
 
+### Keeping data up to date automatically
+
+`python -m utils.daily_update` is a single idempotent job: it downloads the Grid-India daily PSP reports for dates missing
+from `data/daily_energy_met_MU.csv`, appends them to every demand file, fills weather (Open-Meteo) in `data/zenodo_df.csv`
+and `data/14983362/<State>.csv`, reconciles the prediction ledger and clears in-process caches. Missing dates are
+reported (`not published yet` / `no report listed` / `download failed (404)`), never interpolated. Newer revisions of a
+report replace the stored row. Weather for the last 7 days (`WEATHER_PROVISIONAL_DAYS`; final ERA5 lags ~5 days) is
+*provisional* even when it comes from the archive API (`data/weather_provisional.json`): every run re-fetches it, replaces
+rows whose values changed, and drops the marker once the date is older than the window. Runs are serialised by
+`data/daily_update.lock` (a lock left by a dead process on the same host is reclaimed at once, otherwise after 2 h); a run
+skipped because of the lock is recorded in `data/daily_update_skipped.json`. Details go to `logs/daily_update.log`; the
+last result (sanitised error codes only) is in `data/daily_update_status.json`.
+
+```bash
+python -m utils.daily_update                              # up to yesterday (IST), 14-day catch-up
+python -m utils.daily_update --dry-run                    # report only: no data/log writes; still queries the Grid-India listing
+python -m utils.daily_update --catchup 60 --weather-backfill-from 2026-08-30
+```
+
+**Option 1 - inside the API server (opt-in).** Set `LOADLY_AUTO_UPDATE=1` (optionally `LOADLY_UPDATE_TIME=13:00`, IST, and
+`LOADLY_UPDATE_STARTUP_DELAY_S=30`). A daemon thread runs a catch-up shortly after startup and then daily at the chosen time.
+With several uvicorn workers the lock lets only one execute; the others refresh their caches when the files change.
+
+**Option 2 - Windows Task Scheduler** (server need not be running):
+
+```bat
+schtasks /Create /TN "Loadly Daily Update" /SC DAILY /ST 13:00 /F ^
+  /TR "cmd /c cd /d C:\path\to\Loadly && .venv\Scripts\python.exe -m utils.daily_update"
+```
+
+(On Linux use cron: `0 13 * * * cd /path/to/Loadly && .venv/bin/python -m utils.daily_update`.) A running server notices
+changed files within ~5 minutes only if it was started with `LOADLY_AUTO_UPDATE=1`; otherwise restart it (or call
+`POST /api/data/update`, which starts the update in a background thread inside the server process and answers `202`,
+or `409` if a run is already in progress; follow it via `GET /api/data/update-status` -> `running`).
+
+The Docker image does **not** contain `data/` (excluded by `.dockerignore`). Mount a persistent volume at `/app/data`
+holding the CSVs and run the job there (`LOADLY_AUTO_UPDATE=1` or `docker exec loadly-app python -m utils.daily_update`).
+The old GitHub Actions ingestion workflow was removed: an ephemeral runner with gitignored `data/` cannot persist anything.
+
+The training table (`data/processed/feature_engineered_dataset.csv`) is **not** rebuilt daily; it derives from `preprocessed_merged_features_clean.csv`, produced by `notebooks/01_data_preprocessing.ipynb`. To fold months of new data into a new model, refresh that file with the notebook, then run `python utils/train_pipeline.py` (or `POST /api/mlops/retrain`); both evaluate on the held-out backtest, apply the promotion gate, and refit the winner on all rows before deploying. The currently deployed model was trained on data through 2026-08-29. Until then the model is served with fresh demand/weather as inference inputs only.
+
 ---
 
 ## 🔌 API Documentation
@@ -466,6 +531,8 @@ FastAPI automatically serves interactive Swagger documentation at `http://localh
 | `GET` | `/api/analytics/seasonal-comparison`| Historical seasonal statistical breakdown (Summer, Monsoon, Autumn, Winter) |
 | `POST`| `/api/assistant/chat` | Conversational RAG assistant query with grounded source cards |
 | `GET` | `/api/assistant/suggestions` | State-specific prompt suggestions for the AI assistant |
+| `GET` | `/api/data/update-status` | Last automated data update, next scheduled run, newest demand/weather dates (public, read-only) |
+| `POST`| `/api/data/update` | Start the daily data update in the background: `202 {"status":"started"}`, `409` if already running (operator; requires `X-Admin-Key`) |
 
 ---
 
@@ -539,7 +606,7 @@ curl -X POST "http://localhost:8000/api/assistant/chat" \
   "sources": [
     {
       "type": "model_metrics",
-      "snippet": "Model Performance Metrics: Model Name: Reduced_LR (Linear Regression), Test R2: 0.99965, Test MAE: 1.096 MU, Test RMSE: 2.628 MU. State Maharashtra RMSE: 42.00 MU.",
+      "snippet": "Model Performance: The active production electricity demand forecasting model (LR_lags, 17 engineered features) has overall test RMSE of 9.12 MU, MAE of 5.14 MU, and R² of 0.9968.",
       "metadata": { "type": "model_metrics", "source": "model_metadata.json" }
     }
   ],
@@ -625,7 +692,7 @@ Offline data cleaning, statistical research, and model training workflows are pr
 The `utils/` directory contains operational scripts designed to maintain the data store:
 * `fetch_recent_weather.py`: Ingests multi-year historical ERA5 reanalysis weather data via Open-Meteo Archive API.
 * `parse_psp_reports.py`: Scrapes and extracts Power Supply Position (PSP) daily reports published by the National Load Despatch Centre (NLDC).
-* `ingest_2023_2024_demand.py` & `bridge_gap_2024_2025.py`: Bridges historical demand sequences to keep baselines current.
+* `ingest_2023_2024_demand.py`: Ingests available real demand data up to 2024-04-28. Gap-filling/synthesizing scripts were removed: demand rows after that date must come from real PSP reports (`fetch_psp_reports.py` + `replace_fabricated_demand.py`).
 * `train_pipeline.py`: Automated orchestration script to retrain the feature and model pipeline.
 
 ---
@@ -635,7 +702,7 @@ The `utils/` directory contains operational scripts designed to maintain the dat
 To maintain full transparency with utility engineers and researchers, the following known constraints are documented:
 
 1. **Generation Metric Imputation**: Generation features (such as `generation_mu`) are set to `0.0` during real-time inference because real-time state generation schedules are often published with a 24-hour lag. Demand-related rolling averages use precomputed historical baselines.
-2. **Eastern Region (ER) Taxonomy in Legacy XGBoost**: In the legacy 72-feature XGBoost model (`xgb2_model.pkl`), Eastern Region states (Bihar, Jharkhand, Odisha, West Bengal) were mapped into the Northern Region (`nr`) group due to historical training splits. The FastAPI `/api/forecast` route flags this nuance explicitly in the `warnings` array. The primary 15-feature Best Model (`best_model.pkl`) eliminates regional dummies entirely, avoiding this constraint.
+2. **Eastern Region (ER) Taxonomy in Legacy XGBoost**: In the legacy 72-feature XGBoost model (`xgb2_model.pkl`), Eastern Region states (Bihar, Jharkhand, Odisha, West Bengal) were mapped into the Northern Region (`nr`) group due to historical training splits. The FastAPI `/api/forecast` route flags this nuance explicitly in the `warnings` array. The primary 17-feature Best Model (`best_model.pkl`) eliminates regional dummies entirely, avoiding this constraint.
 3. **Island & Mountain Baselines**: Small territories (Lakshadweep, Andaman & Nicobar, Daman & Diu) have low baseline demand ($< 5\,\text{MU}$). When historical demand records are missing, the system utilizes explicit state-level defaults calibrated in `data_loading.py`.
 
 ---

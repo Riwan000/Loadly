@@ -8,10 +8,26 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 import time
 
-from config import ALL_STATES
+from config import ALL_STATES, EASTERN_REGION_STATES
 from data_loading import load_historical_data, load_historical_demand, denormalize_predictions
 from weather import get_weather_forecast
-from features import prepare_features_for_prediction
+from features import (
+    predict_recursive,
+    assess_demand_history,
+    demand_history_warning,
+    DEMAND_STATUS_MISSING,
+)
+
+
+def _guard_demand_history(state_name, historical_demand, start_date):
+    """Stop the tab for states with no demand history; warn when history is stale."""
+    quality = assess_demand_history(historical_demand, start_date)
+    message = demand_history_warning(state_name, quality)
+    if quality.status == DEMAND_STATUS_MISSING:
+        st.error(f"❌ {message}")
+        st.stop()
+    if message:
+        st.warning(f"⚠️ {message}")
 from visualization import (
     plot_demand_temperature_overlay,
     plot_cdd_timeline,
@@ -66,8 +82,7 @@ def render_weather_tab(model, metadata, use_weather_api, health_monitor=None):
         st.write("")
         analyze_btn = st.button("🔍 Analyze Weather Impact", type="primary", use_container_width=True)
 
-    _EASTERN_REGION_STATES = {"Bihar", "Chhattisgarh", "Jharkhand", "Odisha", "West Bengal"}
-    if state_weather in _EASTERN_REGION_STATES:
+    if state_weather in EASTERN_REGION_STATES:
         st.warning(
             f"⚠️ **{state_weather}** is in the Eastern Region (ER), which was not included as a "
             "separate region in the model's training data. Forecasts for this state are "
@@ -98,10 +113,11 @@ def render_weather_tab(model, metadata, use_weather_api, health_monitor=None):
                             st.error("❌ Failed to get weather data. Please try again.")
                             st.stop()
 
-                        X_forecast, df_features = prepare_features_for_prediction(weather_forecast, state_weather, model=model, metadata=metadata)
-                        pred_log = model.predict(X_forecast)
                         historical_demand = load_historical_demand(state_weather)
-                        pred_mu = denormalize_predictions(pred_log, weather_forecast['date'], state_weather, historical_demand)
+                        _guard_demand_history(state_weather, historical_demand, weather_forecast['date'].iloc[0])
+                        preds, df_features = predict_recursive(
+                            model, weather_forecast, state_weather, metadata=metadata, historical_demand=historical_demand)
+                        pred_mu = denormalize_predictions(preds, weather_forecast['date'], state_weather, historical_demand)
 
                         results_df = pd.DataFrame({
                             'date': weather_forecast['date'],
@@ -121,10 +137,16 @@ def render_weather_tab(model, metadata, use_weather_api, health_monitor=None):
 
                     historical_df = historical_df.sort_values('date').tail(90)
 
-                    X_historical, df_features = prepare_features_for_prediction(historical_df, state_weather, model=model, metadata=metadata)
-                    pred_log = model.predict(X_historical)
+                    # Backtest over *historical* weather: observed demand exists for every day, so use
+                    # teacher forcing (actual y(t-1) feeds day t). That shows the model one-step
+                    # response to weather, which is what this tab analyses. Free-running recursion
+                    # over a 90-day window would just be a 90-day-ahead forecast whose error is
+                    # dominated by compounding, not by weather sensitivity.
                     historical_demand = load_historical_demand(state_weather)
-                    pred_mu = denormalize_predictions(pred_log, historical_df['date'], state_weather, historical_demand)
+                    preds, df_features = predict_recursive(
+                        model, historical_df, state_weather, metadata=metadata,
+                        historical_demand=historical_demand, teacher_forcing=True)
+                    pred_mu = denormalize_predictions(preds, historical_df['date'], state_weather, historical_demand)
 
                     results_df = pd.DataFrame({
                         'date': historical_df['date'],
@@ -288,10 +310,11 @@ def render_weather_tab(model, metadata, use_weather_api, health_monitor=None):
                     start_date = datetime.now().date()
                     horizon_days = 14
                     weather_forecast = get_weather_forecast(state_weather, start_date, horizon_days, use_api=use_weather_api)
-                    X_forecast, df_features = prepare_features_for_prediction(weather_forecast, state_weather, model=model, metadata=metadata)
-                    pred_log = model.predict(X_forecast)
                     historical_demand = load_historical_demand(state_weather)
-                    pred_mu = denormalize_predictions(pred_log, weather_forecast['date'], state_weather, historical_demand)
+                    _guard_demand_history(state_weather, historical_demand, weather_forecast['date'].iloc[0])
+                    preds, df_features = predict_recursive(
+                        model, weather_forecast, state_weather, metadata=metadata, historical_demand=historical_demand)
+                    pred_mu = denormalize_predictions(preds, weather_forecast['date'], state_weather, historical_demand)
                     results_df = pd.DataFrame({
                         'date': weather_forecast['date'],
                         'forecasted_demand_MU': pred_mu,

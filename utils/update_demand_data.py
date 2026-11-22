@@ -39,12 +39,15 @@ def update_demand_csvs(df_wide_new: pd.DataFrame, df_long_demand_new: pd.DataFra
         df_new = df_wide_new.copy()
         df_new['Date'] = pd.to_datetime(df_new['Date']).dt.strftime('%Y-%m-%d')
 
+        parsed_total = df_new['Total'] if 'Total' in df_new.columns else pd.Series(np.nan, index=df_new.index)
         for col in orig_cols:
             if col not in df_new.columns:
                 df_new[col] = np.nan
 
+        # Prefer the report's own All-India total; only fall back to summing columns when absent.
         state_cols = [c for c in orig_cols if c not in ['Date', 'Total']]
-        df_new['Total'] = df_new[state_cols].apply(pd.to_numeric, errors='coerce').sum(axis=1)
+        summed = df_new[state_cols].apply(pd.to_numeric, errors='coerce').sum(axis=1)
+        df_new['Total'] = pd.to_numeric(parsed_total, errors='coerce').fillna(summed)
 
         df_orig_filtered = df_orig[~df_orig['Date'].isin(df_new['Date'])]
         combined_wide = pd.concat([df_orig_filtered, df_new[orig_cols]], ignore_index=True)
@@ -68,7 +71,7 @@ def update_demand_csvs(df_wide_new: pd.DataFrame, df_long_demand_new: pd.DataFra
         df_l_new['date'] = pd.to_datetime(df_l_new['date']).dt.strftime('%Y-%m-%d')
 
         sm1_combined = pd.concat([df_sm1, df_l_new], ignore_index=True)
-        sm1_combined = sm1_combined.drop_duplicates(subset=['date', 'States'])
+        sm1_combined = sm1_combined.drop_duplicates(subset=['date', 'States'], keep='last')
         sm1_combined = sm1_combined.sort_values(['date', 'States'])
         sm1_combined.to_csv(STATE_MU_1_PATH, index=False)
         print(f"✓ Updated {STATE_MU_1_PATH}: {len(sm1_combined):,} rows ({sm1_combined['date'].min()} to {sm1_combined['date'].max()})")
@@ -88,7 +91,7 @@ def update_demand_csvs(df_wide_new: pd.DataFrame, df_long_demand_new: pd.DataFra
                 df_g_new[c] = np.nan
 
         sm2_combined = pd.concat([df_sm2, df_g_new[cols_sm2]], ignore_index=True)
-        sm2_combined = sm2_combined.drop_duplicates(subset=['date', 'source'])
+        sm2_combined = sm2_combined.drop_duplicates(subset=['date', 'source'], keep='last')
         sm2_combined = sm2_combined.sort_values(['date', 'source'])
         sm2_combined.to_csv(STATE_MU_2_PATH, index=False)
         print(f"✓ Updated {STATE_MU_2_PATH}: {len(sm2_combined):,} rows ({sm2_combined['date'].min()} to {sm2_combined['date'].max()})")

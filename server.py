@@ -15,10 +15,31 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
 
+from api.auth import (
+    ADMIN_KEY_ENV, KEY_STATUS_MISSING, KEY_STATUS_TOO_SHORT, MIN_ADMIN_KEY_LENGTH, admin_key_status
+)
 from api.routes import router as api_router
 from models import load_model, load_model_metadata
 
 load_dotenv()
+
+
+def _start_update_scheduler():
+    """Start the opt-in daily data-update thread (LOADLY_AUTO_UPDATE=1); never raises."""
+    try:
+        from utils.update_scheduler import DailyUpdateScheduler, scheduler_settings, STARTUP_DELAY_ENV, DEFAULT_STARTUP_DELAY_S
+        from utils.daily_update import run_daily_update, refresh_caches_if_data_changed
+        enabled, time_str = scheduler_settings()
+        if not enabled:
+            return None
+        delay = float(os.getenv(STARTUP_DELAY_ENV, DEFAULT_STARTUP_DELAY_S))
+        scheduler = DailyUpdateScheduler(run_daily_update, time_str, delay, refresh_caches_if_data_changed)
+        scheduler.start()
+        print(f"🔄 Automatic data update enabled: catch-up in {delay:.0f}s, then daily at {time_str} IST")
+        return scheduler
+    except Exception as exc:
+        print(f"⚠️ Could not start the automatic data update scheduler: {exc}")
+        return None
 
 
 @asynccontextmanager
@@ -41,9 +62,21 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️ Warning: Model metadata not found")
 
+    key_status = admin_key_status()
+    if key_status == KEY_STATUS_MISSING:
+        print(f"🔒 Admin endpoints disabled: {ADMIN_KEY_ENV} is not set (they will return 503)")
+    elif key_status == KEY_STATUS_TOO_SHORT:
+        print(f"⚠️ Warning: {ADMIN_KEY_ENV} is shorter than {MIN_ADMIN_KEY_LENGTH} characters; "
+              "admin endpoints are disabled until a stronger key is configured")
+    else:
+        print("✅ Admin key configured for operator endpoints")
+
     print(f"📖 Interactive API Documentation: http://localhost:8000/docs")
     print("=" * 60 + "\n")
+    scheduler = _start_update_scheduler()
     yield
+    if scheduler is not None:
+        scheduler.stop()
     print("\n⚡ Shutting down Loadly API Server...")
 
 
@@ -73,7 +106,8 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=True,
+    # Auth is header-based (X-Admin-Key), not cookie-based, so credentialed CORS is not needed.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -147,4 +181,6 @@ else:
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=True)
+    # Auto-reload is a development convenience only; opt in with LOADLY_DEV=1.
+    dev_mode = os.getenv("LOADLY_DEV", "").strip().lower() in ("1", "true", "yes")
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=dev_mode)

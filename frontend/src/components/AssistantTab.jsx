@@ -12,6 +12,11 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 
+// Must match the backend ChatRequest limits (api/schemas.py).
+const MAX_MESSAGE_CHARS = 2000;
+const MAX_HISTORY_ITEMS = 20;
+const MAX_HISTORY_CONTENT_CHARS = 4000;
+
 export default function AssistantTab({ state, horizonDays }) {
   const [messages, setMessages] = useState([
     {
@@ -49,7 +54,7 @@ export default function AssistantTab({ state, horizonDays }) {
   }, [messages, loading]);
 
   const handleSendMessage = async (textToSend) => {
-    const query = (textToSend || inputMessage).trim();
+    const query = (textToSend || inputMessage).trim().slice(0, MAX_MESSAGE_CHARS);
     if (!query || loading) return;
 
     const userMsg = {
@@ -63,10 +68,13 @@ export default function AssistantTab({ state, horizonDays }) {
     setLoading(true);
 
     // Format chat history for backend
-    const historyPayload = messages.map((m) => ({
-      role: m.role,
-      content: m.content
-    }));
+    const historyPayload = messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-MAX_HISTORY_ITEMS)
+      .map((m) => ({
+        role: m.role,
+        content: String(m.content ?? '').slice(0, MAX_HISTORY_CONTENT_CHARS)
+      }));
 
     try {
       const res = await api.sendChatMessage({
@@ -281,6 +289,7 @@ export default function AssistantTab({ state, horizonDays }) {
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
+              maxLength={MAX_MESSAGE_CHARS}
               placeholder={`Ask a question about ${state}'s demand forecast or cooling load...`}
               disabled={loading}
               className="flex-1 px-4 py-3 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-none text-xs sm:text-sm text-executive-textLight dark:text-executive-textDark placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-executive-navy dark:focus:ring-executive-cyan"

@@ -1,15 +1,44 @@
 # ============================================================================
 # FEATURE ENGINEERING FUNCTIONS
 # ============================================================================
+import logging
 import pandas as pd
 import numpy as np
 import holidays
+from dataclasses import dataclass
+from typing import Optional
+from config import STATE_REGIONS, STALE_DEMAND_DAYS
 from data_loading import (
     get_state_historical_averages,
     load_historical_demand,
     load_historical_data,
     get_fallback_baseline
 )
+
+# ----------------------------------------------------------------------------
+# SHARED FEATURE LISTS (single source of truth for training, retraining, serving)
+# ----------------------------------------------------------------------------
+# Demand features are derived from y(t-1) and earlier only (strictly no y(t)).
+# Rolling/change features: see utils/train_pipeline.add_demand_lag_features.
+DEMAND_LAGS = (1, 7, 14)
+DEMAND_LAG_FEATURE_NAMES = [f'demand_lag_{k}' for k in DEMAND_LAGS]
+# Weather/calendar features (known for the target day, or lagged weather).
+STATIC_FEATURE_NAMES = [
+    '2m_temperature_mean', '2m_temperature_max', 'temperature_lag_1',
+    'temp_range', 'CDD', 'month', 'day_of_week', 'is_weekend',
+]
+# The 15-feature set of the original production model (no direct demand lag: it cannot
+# reconstruct yesterday's level). Kept so legacy artifacts still load and as the
+# backtest reference.
+LEGACY_FEATURE_NAMES = [
+    'demand_roll_mean_7', 'demand_roll_mean_14', 'demand_roll_mean_30',
+    'demand_roll_std_7', 'demand_roll_std_30', 'daily_change', 'daily_pct_change',
+    *STATIC_FEATURE_NAMES,
+]
+# Features of the current production model family: legacy set + direct demand lags.
+# utils/train_pipeline.py and utils/model_retrainer.py both import THIS list.
+PRODUCTION_LAG_FEATURE_NAMES = ['demand_lag_1', 'demand_lag_7']
+PRODUCTION_FEATURE_NAMES = LEGACY_FEATURE_NAMES + PRODUCTION_LAG_FEATURE_NAMES
 
 
 def engineer_features(df, state_name, metadata=None, historical_demand=None):
@@ -76,25 +105,12 @@ def engineer_features(df, state_name, metadata=None, historical_demand=None):
     # -----------------------------
     # 3. State & Region assignment
     # -----------------------------
-    state_to_region = {
-        'Arunachal Pradesh': 'ner', 'Assam': 'ner', 'Bihar': 'er', 'Chhattisgarh': 'er',
-        'Goa': 'wr', 'Gujarat': 'wr', 'Haryana': 'nr', 'Himachal Pradesh': 'nr',
-        'Jammu and Kashmir': 'nr', 'Jharkhand': 'er', 'Karnataka': 'sr', 'Kerala': 'sr',
-        'Madhya Pradesh': 'wr', 'Maharashtra': 'wr', 'Manipur': 'ner', 'Meghalaya': 'ner',
-        'Mizoram': 'ner', 'Nagaland': 'ner', 'Odisha': 'er', 'Punjab': 'nr',
-        'Rajasthan': 'nr', 'Sikkim': 'ner', 'Tamil Nadu': 'sr', 'Telangana': 'sr',
-        'Tripura': 'ner', 'Uttar Pradesh': 'nr', 'Uttarakhand': 'nr', 'West Bengal': 'er',
-        'NCT of Delhi': 'nr', 'Puducherry': 'sr', 'Chandigarh': 'nr',
-        'Dadra and Nagar Haveli': 'wr', 'Daman and Diu': 'wr', 'Lakshadweep': 'sr',
-        'Andaman and Nicobar': 'sr'
-    }
-
     normalized_state = state_name
     if state_name == 'Jammu and Kashmir':
         normalized_state = 'J&K'
 
     df['states'] = normalized_state
-    df['region'] = state_to_region.get(state_name, 'nr')
+    df['region'] = STATE_REGIONS.get(state_name, 'nr')
 
     # -----------------------------
     # 4. Temperature & CDD features
@@ -215,6 +231,19 @@ def engineer_features(df, state_name, metadata=None, historical_demand=None):
     df['daily_change'] = d_change
     df['daily_pct_change'] = d_pct_change
 
+    # Direct demand lags (same values on every row: this path has no recursion; the
+    # recursive path in predict_recursive overwrites them per day).
+    lag_buffer = np.full((1, DEMAND_BUFFER_LEN), np.nan)
+    seed = np.asarray(demands, dtype=float)[-DEMAND_BUFFER_LEN:]
+    if len(seed):
+        lag_buffer[0, -len(seed):] = seed
+        lag_values = demand_features_from_buffer(lag_buffer)
+        for name in DEMAND_LAG_FEATURE_NAMES:
+            df[name] = float(lag_values[name][0])
+    else:
+        for name in DEMAND_LAG_FEATURE_NAMES:
+            df[name] = fallback_baseline
+
     # -----------------------------
     # 7. Legacy state historical averages
     # -----------------------------
@@ -330,19 +359,10 @@ def prepare_features_for_prediction(weather_df, state_name, model=None, metadata
             if state_name == state or (state_name == 'Jammu and Kashmir' and state == 'J&K'):
                 df_features[col_name] = 1
 
-        state_to_region = {
-            'Arunachal Pradesh': 'ner', 'Assam': 'ner', 'Bihar': 'er', 'Chhattisgarh': 'er',
-            'Goa': 'wr', 'Gujarat': 'wr', 'Haryana': 'nr', 'Himachal Pradesh': 'nr',
-            'Jammu and Kashmir': 'nr', 'Jharkhand': 'er', 'Karnataka': 'sr', 'Kerala': 'sr',
-            'Madhya Pradesh': 'wr', 'Maharashtra': 'wr', 'Manipur': 'ner', 'Meghalaya': 'ner',
-            'Mizoram': 'ner', 'Nagaland': 'ner', 'Odisha': 'er', 'Punjab': 'nr',
-            'Rajasthan': 'nr', 'Sikkim': 'ner', 'Tamil Nadu': 'sr', 'Telangana': 'sr',
-            'Tripura': 'ner', 'Uttar Pradesh': 'nr', 'Uttarakhand': 'nr', 'West Bengal': 'er',
-            'NCT of Delhi': 'nr', 'Puducherry': 'sr', 'Chandigarh': 'nr',
-            'Dadra and Nagar Haveli': 'wr', 'Daman and Diu': 'wr', 'Lakshadweep': 'sr',
-            'Andaman and Nicobar': 'sr'
-        }
-        current_region = state_to_region.get(state_name, 'nr')
+        current_region = STATE_REGIONS.get(state_name, 'nr')
+        # Legacy models (xgb1/xgb2) were trained with one-hot regions ner/nr/sr/wr and no
+        # 'er' column, so Eastern states are collapsed onto 'nr'. Known limitation; the
+        # current production model has no region features and never reaches this branch.
         if current_region == 'er':
             current_region = 'nr'
         regions_ordered = ['ner', 'nr', 'sr', 'wr']
@@ -380,3 +400,255 @@ def prepare_features_for_prediction(weather_df, state_name, model=None, metadata
             X[feat] = 0.0
 
     return X, df_features
+
+
+# ============================================================================
+# RECURSIVE (MULTI-STEP) PREDICTION
+# ============================================================================
+# The production model is a ONE-STEP-AHEAD model: its 7 demand features are built
+# from y(t-1) and earlier (see utils/train_pipeline.add_demand_lag_features). To
+# forecast a horizon of H days, prediction k must therefore be appended to the
+# demand buffer before features for day k+1 are built.
+DEMAND_FEATURE_NAMES = [
+    'demand_roll_mean_7', 'demand_roll_mean_14', 'demand_roll_mean_30',
+    'demand_roll_std_7', 'demand_roll_std_30',
+    'daily_change', 'daily_pct_change',
+    *DEMAND_LAG_FEATURE_NAMES,
+]
+DEMAND_BUFFER_LEN = 30  # longest rolling window (demand_roll_*_30)
+
+logger = logging.getLogger(__name__)
+
+
+def demand_features_from_buffer(buffer):
+    """
+    Vectorised demand features for R independent series, mirroring training exactly.
+
+    Parameters:
+        buffer (np.ndarray): shape (R, DEMAND_BUFFER_LEN). Last column is y(t-1), the
+            most recent known value; shorter histories are left-padded with NaN.
+            Every row needs at least one non-NaN value.
+
+    Training definitions (add_demand_lag_features): demand_lag_k = y(t-k); rolling mean/std over the series
+    shifted by one with min_periods=1 (so a window shorter than w uses what exists),
+    std with ddof=1 (0.0 for a single observation), daily_change = y(t-1) - y(t-2),
+    daily_pct_change = daily_change / y(t-2) with 0.0 where undefined (y(t-2) == 0).
+    """
+    buf = np.asarray(buffer, dtype=float)
+
+    def _window_mean_std(w):
+        win = buf[:, -w:]
+        valid = ~np.isnan(win)
+        count = valid.sum(axis=1)
+        mean = np.where(valid, win, 0.0).sum(axis=1) / np.maximum(count, 1)
+        sq_dev = np.where(valid, (win - mean[:, None]) ** 2, 0.0).sum(axis=1)
+        std = np.where(count > 1, np.sqrt(sq_dev / np.maximum(count - 1, 1)), 0.0)
+        return mean, std
+
+    out = {}
+    for w in (7, 14, 30):
+        mean, std = _window_mean_std(w)
+        out[f'demand_roll_mean_{w}'] = mean
+        if w in (7, 30):
+            out[f'demand_roll_std_{w}'] = std
+
+    # Direct lags: y(t-k) = buf[:, -k]. Training leaves lag_k NaN (and drops the row) when
+    # fewer than k prior days exist; a too-short serving buffer instead falls back to the
+    # mean of the values that do exist (finite, no leak, never used in training).
+    available_mean = _window_mean_std(buf.shape[1])[0]
+    for k in DEMAND_LAGS:
+        lagged = buf[:, -k]
+        out[f'demand_lag_{k}'] = np.where(np.isnan(lagged), available_mean, lagged)
+
+    last, prev = buf[:, -1], buf[:, -2]
+    both = ~np.isnan(last) & ~np.isnan(prev)
+    change = np.where(both, last - prev, 0.0)
+    safe_prev = np.where(both & (prev != 0), prev, 1.0)
+    out['daily_change'] = change
+    out['daily_pct_change'] = np.where(both & (prev != 0), change / safe_prev, 0.0)
+    return out
+
+
+def recursive_forecast_batch(model, feature_names, static, static_names, buffer,
+                             actuals=None, is_log_scale=False):
+    """
+    Day-by-day prediction for R independent series at once (core shared by
+    predict_recursive and the training-time backtest in utils/backtest.py).
+
+    Parameters:
+        model: fitted regressor exposing predict(DataFrame)
+        feature_names (list[str]): model inputs in order; demand features are computed
+            here, every other name must appear in static_names
+        static (np.ndarray): shape (R, H, len(static_names)) non-demand features
+        static_names (list[str]): column names of the last axis of `static`
+        buffer (np.ndarray): shape (R, DEMAND_BUFFER_LEN) initial demand history,
+            most recent value last, NaN-left-padded
+        actuals (np.ndarray, optional): shape (R, H). Where not NaN, the observed value
+            (instead of the prediction) is appended to the buffer = teacher forcing.
+        is_log_scale (bool): model output is log1p(MU); buffer receives expm1(output)
+
+    Returns:
+        tuple: (raw model outputs, buffer values used per day), both shape (R, H).
+        The second element is the demand series the recursion actually fed back.
+    """
+    static = np.asarray(static, dtype=float)
+    n_runs, horizon, _ = static.shape
+    static_idx = {name: i for i, name in enumerate(static_names)}
+    missing = [f for f in feature_names if f not in DEMAND_FEATURE_NAMES and f not in static_idx]
+    if missing:
+        raise ValueError(f"Features neither demand-derived nor supplied as static: {missing}")
+
+    buf = np.array(buffer, dtype=float, copy=True)
+    preds = np.zeros((n_runs, horizon))
+    fed_back = np.zeros((n_runs, horizon))
+    for k in range(horizon):
+        demand = demand_features_from_buffer(buf)
+        columns = {
+            f: demand[f] if f in demand else static[:, k, static_idx[f]]
+            for f in feature_names
+        }
+        raw = np.asarray(model.predict(pd.DataFrame(columns, columns=list(feature_names))), dtype=float)
+        preds[:, k] = raw
+
+        value_mu = np.expm1(raw) if is_log_scale else raw
+        value_mu = np.maximum(0.0, value_mu)  # same clipping as denormalize_predictions
+        if actuals is not None:
+            observed = np.asarray(actuals, dtype=float)[:, k]
+            value_mu = np.where(np.isnan(observed), value_mu, observed)
+        fed_back[:, k] = value_mu
+        buf = np.concatenate([buf[:, 1:], value_mu[:, None]], axis=1)
+    return preds, fed_back
+
+
+DEMAND_STATUS_OK = "ok"
+DEMAND_STATUS_STALE = "stale"
+DEMAND_STATUS_MISSING = "missing"
+
+
+@dataclass(frozen=True)
+class DemandHistoryQuality:
+    """Freshness of the demand history that seeds a recursive forecast."""
+    status: str  # DEMAND_STATUS_OK | DEMAND_STATUS_STALE | DEMAND_STATUS_MISSING
+    last_date: Optional[pd.Timestamp] = None
+    age_days: Optional[int] = None  # forecast start minus last observation
+
+
+def assess_demand_history(historical_demand, first_date, stale_days=STALE_DEMAND_DAYS):
+    """Classify history before `first_date` as missing (none), stale (> stale_days old) or ok."""
+    first_date = pd.to_datetime(first_date)
+    if historical_demand is None or len(historical_demand) == 0:
+        return DemandHistoryQuality(DEMAND_STATUS_MISSING)
+    prior = historical_demand[historical_demand['date'] < first_date]
+    if len(prior) == 0:
+        return DemandHistoryQuality(DEMAND_STATUS_MISSING)
+    last_date = pd.to_datetime(prior['date'].max())
+    age_days = int((first_date - last_date).days)
+    status = DEMAND_STATUS_STALE if age_days > stale_days else DEMAND_STATUS_OK
+    return DemandHistoryQuality(status, last_date, age_days)
+
+
+def demand_history_warning(state_name, quality, stale_days=STALE_DEMAND_DAYS):
+    """Human-readable data-quality notice for a quality result, or None when ok."""
+    if quality.status == DEMAND_STATUS_MISSING:
+        return f"{state_name} has no demand history, so no reliable forecast can be produced."
+    if quality.status == DEMAND_STATUS_STALE:
+        return (f"{state_name}: the latest demand observation is {quality.last_date.date()} "
+                f"({quality.age_days} days before the forecast start; limit {stale_days}). "
+                "The forecast is seeded from stale data and is less reliable.")
+    return None
+
+
+def _seed_demand_buffer(historical_demand, first_date, state_name):
+    """Last DEMAND_BUFFER_LEN observed values strictly before first_date (NaN-left-padded)."""
+    values = np.array([], dtype=float)
+    if historical_demand is not None and len(historical_demand) > 0:
+        hist = historical_demand.sort_values('date')
+        prior = hist[hist['date'] < first_date]
+        values = prior['actual_demand_MU'].to_numpy(dtype=float)[-DEMAND_BUFFER_LEN:]
+        if len(prior) > 0:
+            gap_days = (first_date - prior['date'].iloc[-1]).days - 1
+            if gap_days > 0:
+                logger.warning(
+                    "Demand history for %s ends %d day(s) before the forecast start; "
+                    "the gap is not back-filled so early horizons are staler than nominal.",
+                    state_name, gap_days)
+    if len(values) == 0:
+        logger.warning("No demand history for %s; seeding recursion with the fallback baseline.", state_name)
+        values = np.full(DEMAND_BUFFER_LEN, get_fallback_baseline(state_name))
+    padded = np.full(DEMAND_BUFFER_LEN, np.nan)
+    padded[-len(values):] = values
+    return padded[None, :]
+
+
+def predict_recursive(model, weather_df, state_name, metadata=None, historical_demand=None,
+                      teacher_forcing=False, is_log_scale=False):
+    """
+    Multi-day forecast that feeds each prediction back into the demand features.
+
+    Day k's demand_roll_* / daily_change / daily_pct_change are computed from the
+    observed history plus predictions for days 1..k-1 (training definitions).
+
+    Parameters:
+        model: loaded model
+        weather_df (pd.DataFrame): weather for the forecast days (ascending dates)
+        state_name (str)
+        metadata (dict, optional): model_metadata.json contents
+        historical_demand (pd.DataFrame, optional): date + actual_demand_MU; only rows
+            before the first weather date seed the buffer
+        teacher_forcing (bool): when True, observed demand from historical_demand for
+            day k (if known) replaces the prediction in the buffer. Use for
+            backtests over historical weather, where one-step-ahead behaviour is the
+            honest question; never for a live forecast.
+        is_log_scale (bool): legacy log1p-target models
+
+    Returns:
+        tuple: (predictions, df_features)
+            - predictions: np.ndarray of raw model outputs (same scale as model.predict)
+            - df_features: engineered features, with the demand columns the model
+              actually saw on each day
+
+    Models that do not use the demand features (legacy XGBoost) or whose inputs are
+    not all engineered columns fall back to a single batch predict (nothing to feed back).
+    """
+    if historical_demand is None:
+        historical_demand = load_historical_demand(state_name)
+
+    df_features = engineer_features(weather_df, state_name, metadata=metadata,
+                                    historical_demand=historical_demand)
+
+    expected = list(model.feature_names_in_) if hasattr(model, 'feature_names_in_') else None
+    uses_demand = bool(expected) and any(f in DEMAND_FEATURE_NAMES for f in expected)
+    recursive_ok = uses_demand and all(f in df_features.columns for f in expected)
+
+    if not recursive_ok:
+        if uses_demand:
+            logger.warning("Model inputs are not all engineered columns; falling back to non-recursive prediction.")
+        X, df_features = prepare_features_for_prediction(
+            weather_df, state_name, model=model, metadata=metadata, historical_demand=historical_demand)
+        return np.asarray(model.predict(X), dtype=float), df_features
+
+    first_date = pd.to_datetime(df_features['date'].iloc[0])
+    buffer = _seed_demand_buffer(historical_demand, first_date, state_name)
+
+    static_names = [f for f in expected if f not in DEMAND_FEATURE_NAMES]
+    static = df_features[static_names].to_numpy(dtype=float)[None, :, :]
+
+    actuals = None
+    if teacher_forcing and historical_demand is not None and len(historical_demand) > 0:
+        observed = historical_demand.drop_duplicates('date').set_index('date')['actual_demand_MU']
+        actuals = observed.reindex(pd.to_datetime(df_features['date'])).to_numpy(dtype=float)[None, :]
+
+    preds, fed_back = recursive_forecast_batch(model, expected, static, static_names, buffer,
+                                               actuals=actuals, is_log_scale=is_log_scale)
+
+    # Record the demand features the model actually saw: day k used buffer + fed_back[:k].
+    seen = {name: [] for name in DEMAND_FEATURE_NAMES}
+    replay = buffer.copy()
+    for k in range(len(df_features)):
+        demand = demand_features_from_buffer(replay)
+        for name in DEMAND_FEATURE_NAMES:
+            seen[name].append(float(demand[name][0]))
+        replay = np.concatenate([replay[:, 1:], fed_back[:, k:k + 1]], axis=1)
+    for name in DEMAND_FEATURE_NAMES:
+        df_features[name] = seen[name]
+    return preds[0], df_features
