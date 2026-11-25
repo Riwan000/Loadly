@@ -186,9 +186,14 @@ def get_horizon_rmse(state_name, horizon, metadata):
     return state_rmse
 
 
-def get_horizon_rmse_series(state_name, n_days, metadata):
-    """List of get_horizon_rmse for horizons 1..n_days, or None if any is unavailable."""
-    values = [get_horizon_rmse(state_name, h, metadata) for h in range(1, n_days + 1)]
+def get_horizon_rmse_series(state_name, n_days, metadata, first_horizon=1):
+    """
+    List of get_horizon_rmse for horizons first_horizon..first_horizon+n_days-1, or None
+    if any is unavailable. Horizons beyond the backtested maximum reuse the largest
+    available value (see _lookup_horizon).
+    """
+    values = [get_horizon_rmse(state_name, h, metadata)
+              for h in range(first_horizon, first_horizon + n_days)]
     if any(v is None for v in values):
         return None
     return values

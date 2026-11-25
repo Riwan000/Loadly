@@ -12,11 +12,15 @@ from scipy import stats
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from config import ALL_STATES, STATE_COORDINATES, NATIONAL_STATE, STATE_REGIONS, EASTERN_REGION_STATES
-from models import load_model, load_model_metadata, get_state_rmse, get_horizon_rmse, get_horizon_rmse_series
+from models import load_model, load_model_metadata, get_state_rmse, get_horizon_rmse
 from data_loading import load_historical_demand, load_historical_data, denormalize_predictions
 from weather import get_weather_forecast
+from forecasting import (
+    forecast_bridged, bridged_horizon_rmse, bridge_warning, national_bridge_warning,
+    WeatherFetchError, WeatherEmptyError,
+)
 from features import (
-    predict_recursive, engineer_features, assess_demand_history, demand_history_warning,
+    engineer_features, assess_demand_history, demand_history_warning,
     DEMAND_STATUS_MISSING, DEMAND_STATUS_STALE,
 )
 from visualization import (
@@ -259,21 +263,27 @@ def generate_forecast_endpoint(req: ForecastRequest):
                 # No history: a forecast would be a fake 0.0 MU; excluded from the sum instead.
                 return {"state": st_name, "excluded": True, "quality": quality}
 
-            try:
-                wf = get_weather_forecast(st_name, start_date, req.horizon_days, use_api=req.use_weather_api)
-            except Exception:
-                wf = get_weather_forecast(st_name, start_date, req.horizon_days, use_api=False)
-
             used_fallback = False
-            try:
-                preds, df_feat = predict_recursive(
-                    model, wf, st_name, metadata=metadata, historical_demand=hist)
-                denorm = denormalize_predictions(preds, wf['date'], st_name, hist, is_log_scale=False)
-            except Exception:
+            bridged = None
+            # Live weather first, then climatology if that attempt fails for any reason.
+            for use_api in ([True, False] if req.use_weather_api else [False]):
+                try:
+                    bridged = forecast_bridged(model, st_name, start_date, req.horizon_days,
+                                               metadata, hist, use_api=use_api)
+                    break
+                except Exception:
+                    logger.warning("All-India forecast failed for %s (use_api=%s).",
+                                   st_name, use_api, exc_info=True)
+
+            if bridged is not None:
+                wf, df_feat = bridged.weather, bridged.df_features
+                denorm = denormalize_predictions(bridged.predictions, wf['date'], st_name, hist, is_log_scale=False)
+            else:
                 # Do not hide this: the state's forecast becomes a flat historical mean.
-                logger.exception("All-India forecast: model prediction failed for %s; "
-                                 "substituting historical mean.", st_name)
+                logger.error("All-India forecast: model prediction failed for %s; "
+                             "substituting historical mean.", st_name)
                 used_fallback = True
+                wf = get_weather_forecast(st_name, start_date, req.horizon_days, use_api=False)
                 fallback_mean = float(hist['actual_demand_MU'].mean()) if hist is not None and len(hist) > 0 else 100.0
                 denorm = np.array([fallback_mean] * req.horizon_days)
                 df_feat = pd.DataFrame({
@@ -282,7 +292,8 @@ def generate_forecast_endpoint(req: ForecastRequest):
                     'is_holiday': [0] * req.horizon_days
                 })
 
-            rmse_h = get_horizon_rmse_series(st_name, len(wf), metadata)
+            gap_days = bridged.gap_days if bridged is not None else 0
+            rmse_h = bridged_horizon_rmse(st_name, gap_days, len(wf), metadata)
             if rmse_h is None:
                 rmse_h = [DEFAULT_STATE_RMSE_MU] * len(wf)
             return {
@@ -294,6 +305,7 @@ def generate_forecast_endpoint(req: ForecastRequest):
                 "fallback": used_fallback,
                 "excluded": False,
                 "quality": quality,
+                "bridged": bridged,
                 "dates": [pd.to_datetime(d).strftime('%Y-%m-%d') for d in wf['date']]
             }
 
@@ -324,9 +336,12 @@ def generate_forecast_endpoint(req: ForecastRequest):
         # Per-day national sigma. Prefer the backtested national aggregate error
         # (state errors are strongly correlated, so a root-sum-of-squares of state
         # RMSEs understates it); otherwise fall back to that independence assumption.
+        # Day k of the response has true horizon gap + k; use the widest bridged gap (conservative).
+        bridged_by_state = {r["state"]: r["bridged"] for r in state_results if r["bridged"] is not None}
+        national_gap = max([b.gap_days for b in bridged_by_state.values()], default=0)
         if get_horizon_rmse("All-India", 1, metadata) is not None:
             portfolio_sigma_h = np.array(
-                [get_horizon_rmse("All-India", h, metadata) for h in range(1, num_days + 1)], dtype=float)
+                bridged_horizon_rmse("All-India", national_gap, num_days, metadata), dtype=float)
         else:
             portfolio_sigma_h = np.sqrt(sum(r["rmse_h"][:num_days] ** 2 for r in state_results))
         portfolio_sigma = float(portfolio_sigma_h[0])
@@ -431,6 +446,9 @@ def generate_forecast_endpoint(req: ForecastRequest):
         )
 
         warnings = []
+        bridge_note = national_bridge_warning(bridged_by_state)
+        if bridge_note:
+            warnings.append(bridge_note)
         if fallback_states:
             warnings.append(
                 "Model prediction failed for " + ", ".join(fallback_states) +
@@ -440,7 +458,8 @@ def generate_forecast_endpoint(req: ForecastRequest):
 
         try:
             timeline_dicts = [t.model_dump() if hasattr(t, "model_dump") else t.dict() for t in timeline]
-            record_forecast_batch(timeline_dicts, "All-India", model_name=model_name)
+            record_forecast_batch(timeline_dicts, "All-India", model_name=model_name,
+                                  horizon_offset=national_gap)
         except Exception:
             pass
 
@@ -465,34 +484,25 @@ def generate_forecast_endpoint(req: ForecastRequest):
     data_quality_warnings = [w for w in [demand_history_warning(req.state, quality)] if w]
 
     try:
-        weather_forecast = get_weather_forecast(
-            req.state,
-            start_date,
-            req.horizon_days,
-            use_api=req.use_weather_api
-        )
-    except Exception:
-        logger.exception("Weather forecast retrieval failed for %s", req.state)
+        bridged = forecast_bridged(
+            model, req.state, start_date, req.horizon_days, metadata, historical_demand,
+            use_api=req.use_weather_api)
+    except WeatherFetchError:
         raise HTTPException(status_code=502, detail="Weather data provider error. Please try again later.")
-
-    if weather_forecast is None or len(weather_forecast) == 0:
+    except WeatherEmptyError:
         raise HTTPException(status_code=500, detail="Failed to retrieve weather data.")
-
-    try:
-        preds, df_features = predict_recursive(
-            model, weather_forecast, req.state, metadata=metadata, historical_demand=historical_demand
-        )
-        denorm_result = denormalize_predictions(
-            preds, weather_forecast['date'], req.state, historical_demand, is_log_scale=False
-        )
     except Exception:
         logger.exception("Forecast calculation failed for %s", req.state)
         raise HTTPException(status_code=500, detail="Forecasting calculation error.")
 
+    weather_forecast, df_features = bridged.weather, bridged.df_features
+    denorm_result = denormalize_predictions(
+        bridged.predictions, weather_forecast['date'], req.state, historical_demand, is_log_scale=False)
+
     # Calculate Confidence Intervals
-    # Horizon-aware: day k uses the backtested k-day-ahead RMSE, not the 1-day RMSE.
+    # Horizon-aware: day k uses the backtested RMSE at its true lead time (gap + k).
     state_rmse = get_state_rmse(req.state, metadata)
-    rmse_h = get_horizon_rmse_series(req.state, len(denorm_result), metadata)
+    rmse_h = bridged_horizon_rmse(req.state, bridged.gap_days, len(denorm_result), metadata)
 
     if rmse_h is not None:
         z_score = stats.norm.ppf((1 + confidence_level) / 2)
@@ -541,6 +551,9 @@ def generate_forecast_endpoint(req: ForecastRequest):
 
     # Domain warnings
     warnings = []
+    bridge_note = bridge_warning(req.state, bridged.last_observed, bridged.gap_days)
+    if bridge_note:
+        warnings.append(bridge_note)
     if req.state in EASTERN_REGION_STATES:
         warnings.append(
             f"{req.state} is in the Eastern Region (ER), which was not included as a separate "
@@ -550,7 +563,8 @@ def generate_forecast_endpoint(req: ForecastRequest):
     # Non-blocking automatic logging to Prediction Ledger
     try:
         timeline_dicts = [t.model_dump() if hasattr(t, "model_dump") else t.dict() for t in timeline]
-        record_forecast_batch(timeline_dicts, req.state, model_name=model_name)
+        record_forecast_batch(timeline_dicts, req.state, model_name=model_name,
+                              horizon_offset=bridged.gap_days)
     except Exception as ledger_err:
         pass
 
@@ -649,20 +663,26 @@ def get_weather_impact_analytics(req: WeatherImpactRequest):
         weather_df = historical_df
     else:
         start_date = date.today()
-        weather_df = get_weather_forecast(req.state, start_date, req.horizon_days, use_api=req.use_weather_api)
-        if weather_df is None or len(weather_df) == 0:
-            raise HTTPException(status_code=500, detail="Failed to fetch weather data for analysis.")
-
         if model:
             historical_demand = load_historical_demand(req.state)
             quality = assess_demand_history(historical_demand, pd.Timestamp(start_date))
             if quality.status == DEMAND_STATUS_MISSING:
                 raise HTTPException(status_code=422, detail=demand_history_warning(req.state, quality))
-            preds, df_features = predict_recursive(
-                model, weather_df, req.state, metadata=metadata, historical_demand=historical_demand
-            )
-            denorm_result = denormalize_predictions(preds, weather_df['date'], req.state, historical_demand)
+            try:
+                bridged = forecast_bridged(
+                    model, req.state, start_date, req.horizon_days, metadata, historical_demand,
+                    use_api=req.use_weather_api)
+            except WeatherFetchError:
+                raise HTTPException(status_code=502, detail="Weather data provider error. Please try again later.")
+            except WeatherEmptyError:
+                raise HTTPException(status_code=500, detail="Failed to fetch weather data for analysis.")
+            weather_df, df_features = bridged.weather, bridged.df_features
+            denorm_result = denormalize_predictions(
+                bridged.predictions, weather_df['date'], req.state, historical_demand)
         else:
+            weather_df = get_weather_forecast(req.state, start_date, req.horizon_days, use_api=req.use_weather_api)
+            if weather_df is None or len(weather_df) == 0:
+                raise HTTPException(status_code=500, detail="Failed to fetch weather data for analysis.")
             df_features = engineer_features(weather_df, req.state, metadata=metadata)
             denorm_result = np.zeros(len(weather_df))
 

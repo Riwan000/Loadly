@@ -2,14 +2,39 @@
 # WEATHER API FUNCTIONS
 # ============================================================================
 import logging
+from datetime import date, timedelta
+
 import requests
 import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Open-Meteo forecast request: `forecast_days` ahead of today plus `past_days` behind it
+# (the API allows up to 92). Explicit start_date/end_date are avoided because their
+# allowed range edge differs from forecast_days and a violation is a hard HTTP 400.
+OPENMETEO_FORECAST_DAYS = 16
+OPENMETEO_MAX_PAST_DAYS = 92
+OPENMETEO_PAST_DAYS_SLACK = 1
+
 from config import STATE_COORDINATES
 from data_loading import load_historical_data
+
+
+def _slice_daily_window(daily_data, window_start, window_end):
+    """
+    Keep the rows of an Open-Meteo `daily` block dated within [window_start, window_end],
+    cut at the first row without temperatures. The API pads the last requested day with
+    nulls (the 16th forecast day is often empty); those days are left to climatology.
+    """
+    keep = []
+    for i, t in enumerate(daily_data["time"]):
+        if not window_start <= pd.Timestamp(t).date() <= window_end:
+            continue
+        if daily_data["temperature_2m_max"][i] is None or daily_data["temperature_2m_min"][i] is None:
+            break
+        keep.append(i)
+    return {key: [values[i] for i in keep] for key, values in daily_data.items()}
 
 
 def get_weather_forecast_openmeteo(state_name, start_date, num_days):
@@ -21,11 +46,13 @@ def get_weather_forecast_openmeteo(state_name, start_date, num_days):
 
     Parameters:
         state_name (str): Name of the Indian state
-        start_date (datetime.date): Start date for forecast
-        num_days (int): Number of days to forecast (max 16 for free tier)
+        start_date (datetime.date): First day of the window; may be in the recent past
+        num_days (int): Number of days wanted (callers fill any shortfall with climatology).
 
     Returns:
-        pd.DataFrame: Weather data matching model's expected format
+        pd.DataFrame: Weather data matching model's expected format, starting exactly
+        at start_date (ValueError otherwise). Rows beyond today + 15 are
+        not available, so fewer than num_days rows may come back
     """
     if state_name not in STATE_COORDINATES:
         raise ValueError(f"Coordinates not found for state: {state_name}")
@@ -33,7 +60,13 @@ def get_weather_forecast_openmeteo(state_name, start_date, num_days):
     coords = STATE_COORDINATES[state_name]
     lat, lon = coords["lat"], coords["lon"]
 
-    num_days = min(num_days, 16)
+    window_start = pd.Timestamp(start_date).date()
+    window_end = window_start + timedelta(days=num_days - 1)
+    # One day of slack: Open-Meteo anchors its window to the Asia/Kolkata date, which can be
+    # a day ahead of the host's date (UTC hosts, 00:00-05:30 IST). Extra rows are sliced off.
+    past_days = max(0, (date.today() - window_start).days) + OPENMETEO_PAST_DAYS_SLACK
+    if past_days > OPENMETEO_MAX_PAST_DAYS:
+        raise ValueError(f"start_date {window_start} is older than the Open-Meteo past range")
 
     try:
         url = "https://api.open-meteo.com/v1/forecast"
@@ -43,7 +76,8 @@ def get_weather_forecast_openmeteo(state_name, start_date, num_days):
         base_params = {
             "latitude": lat,
             "longitude": lon,
-            "forecast_days": num_days,
+            "past_days": past_days,
+            "forecast_days": OPENMETEO_FORECAST_DAYS,
             "timezone": "Asia/Kolkata"
         }
         query_parts = [urlencode(base_params), f"daily={daily_params}"]
@@ -56,7 +90,7 @@ def get_weather_forecast_openmeteo(state_name, start_date, num_days):
         if "daily" not in data:
             raise ValueError("Invalid API response: missing 'daily' key")
 
-        daily_data = data["daily"]
+        daily_data = _slice_daily_window(data["daily"], window_start, window_end)
 
         temp_mean = [(max + min) / 2 for max, min in zip(
             daily_data["temperature_2m_max"],
@@ -69,6 +103,11 @@ def get_weather_forecast_openmeteo(state_name, start_date, num_days):
             "2m_temperature_min": daily_data["temperature_2m_min"],
             "2m_temperature_mean": temp_mean,
         })
+
+        if len(forecast_df) == 0 or forecast_df["date"].iloc[0].date() != window_start:
+            raise ValueError(
+                f"Open-Meteo returned dates starting {daily_data['time'][:1]} "
+                f"instead of {window_start}")
 
         # Convert temperatures from Celsius to Kelvin
         forecast_df["2m_temperature_max"] = forecast_df["2m_temperature_max"] + 273.15
@@ -263,8 +302,9 @@ def get_weather_forecast(state_name, start_date, num_days, use_api=True):
     """
     Main function to get weather forecast with automatic fallback and blending.
 
-    For horizons > 16 days, blends Open-Meteo live forecast (days 1-16)
-    with climatology estimates (days 17-horizon).
+    Days Open-Meteo cannot serve (beyond today + 15) are filled with climatology
+    estimates; if the API fails or misaligns its dates, everything is climatology.
+    start_date may be in the recent past (used to bridge gaps in observed demand).
 
     Parameters:
         state_name (str): Name of the Indian state
@@ -275,24 +315,17 @@ def get_weather_forecast(state_name, start_date, num_days, use_api=True):
     Returns:
         pd.DataFrame: Weather forecast data
     """
-    if use_api:
-        try:
-            if num_days <= 16:
-                return get_weather_forecast_openmeteo(state_name, start_date, num_days)
-            else:
-                # Fetch up to 16 days from Open-Meteo
-                df_api = get_weather_forecast_openmeteo(state_name, start_date, 16)
-                api_len = len(df_api)
-                if api_len < num_days:
-                    start_dt = pd.to_datetime(start_date)
-                    next_date = (start_dt + pd.Timedelta(days=api_len)).date()
-                    remaining_days = num_days - api_len
-                    df_clim = get_weather_forecast_climatology(state_name, next_date, remaining_days)
-                    combined = pd.concat([df_api, df_clim], ignore_index=True)
-                    return combined
-                return df_api
-        except Exception as e:
-            logger.warning(f"Weather API failed: {str(e)}. Using historical averages...")
-            return get_weather_forecast_climatology(state_name, start_date, num_days)
-    else:
+    if not use_api:
         return get_weather_forecast_climatology(state_name, start_date, num_days)
+    try:
+        df_api = get_weather_forecast_openmeteo(state_name, start_date, num_days)
+    except Exception as e:
+        logger.warning(f"Weather API failed: {str(e)}. Using historical averages...")
+        return get_weather_forecast_climatology(state_name, start_date, num_days)
+
+    api_len = len(df_api)
+    if api_len >= num_days:
+        return df_api
+    next_date = (pd.Timestamp(start_date) + pd.Timedelta(days=api_len)).date()
+    df_clim = get_weather_forecast_climatology(state_name, next_date, num_days - api_len)
+    return pd.concat([df_api, df_clim], ignore_index=True)

@@ -65,11 +65,15 @@ def record_forecast_batch(
     state: str,
     model_name: str = "Reduced_LR",
     db_path: Optional[Path] = None,
-    auto_reconcile: bool = True
+    auto_reconcile: bool = True,
+    horizon_offset: int = 0
 ) -> str:
     """
     Record a batch of forecasted timeline items (e.g. 7, 14, or 30 days) into the ledger.
     Returns the unique forecast_id (UUID4).
+
+    horizon_step is the true lead time of each row: its 1-based position plus
+    horizon_offset (the number of unobserved days the forecast was bridged over).
     """
     init_ledger_db(db_path)
     forecast_id = str(uuid.uuid4())
@@ -127,7 +131,7 @@ def record_forecast_batch(
                 forecast_id,
                 state,
                 dt_str,
-                idx + 1,
+                idx + 1 + horizon_offset,
                 model_name,
                 pred_mu,
                 lower_mu,
