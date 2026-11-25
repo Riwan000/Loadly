@@ -21,6 +21,11 @@ plotly>=5.17.0
 # HTTP Requests (for Weather API)
 requests>=2.31.0
 
+# PSP report parsing (daily demand update: .xls / .xlsx / .pdf)
+xlrd>=2.0.1
+openpyxl>=3.1.0
+pypdf>=4.0.0
+
 # Date/Time Utilities
 holidays>=0.34
 
