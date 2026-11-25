@@ -3,6 +3,7 @@ Unit and integration tests for Model Drift Detection & Adaptive Retraining Engin
 """
 
 import os
+from datetime import date, timedelta
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -20,6 +21,11 @@ from utils.model_retrainer import (
     rollback_model,
 )
 from utils.prediction_ledger import init_ledger_db, get_db_connection
+
+
+def _recent_date(days_ago: int) -> str:
+    """Target date inside compute_drift_metrics' trailing window (default 14 days), relative to today."""
+    return (date.today() - timedelta(days=days_ago + 1)).isoformat()
 
 
 @pytest.fixture
@@ -72,7 +78,7 @@ def test_compute_drift_metrics_healthy(temp_db):
                     temperature_mean_c, cdd, actual_demand_mu, error_mu, abs_error_mu, pct_error, within_ci
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                f"fc-{i}", f"2026-11-{10+i:02d}", "Maharashtra", 1, "Reduced_LR",
+                f"fc-{i}", _recent_date(i), "Maharashtra", 1, "Reduced_LR",
                 500.0, 480.0, 520.0,
                 30.0, 5.0, 502.0, 2.0, 2.0, 0.4, 1
             ))
@@ -98,7 +104,7 @@ def test_compute_drift_metrics_critical_drift(temp_db):
                     temperature_mean_c, cdd, actual_demand_mu, error_mu, abs_error_mu, pct_error, within_ci
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                f"fc-{i}", f"2026-11-{10+i:02d}", "Maharashtra", 1, "Reduced_LR",
+                f"fc-{i}", _recent_date(i), "Maharashtra", 1, "Reduced_LR",
                 500.0, 480.0, 520.0,
                 30.0, 5.0, 560.0, 60.0, 60.0, 10.7, 0
             ))
