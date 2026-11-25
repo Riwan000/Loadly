@@ -118,7 +118,12 @@ def test_compute_drift_metrics_critical_drift(temp_db):
     assert metrics["recommended_action"] == "RETRAIN_RECOMMENDED"
 
 
-def test_retraining_and_rollback_flow(temp_db):
+def test_retraining_and_rollback_flow(temp_db, tmp_path, monkeypatch):
+    # Synthetic dataset: the real feature table is git-ignored and absent in CI.
+    ds = tmp_path / "ds.csv"
+    _write_tiny_dataset(ds)
+    monkeypatch.setattr(model_retrainer, "DATASET_PATH", ds)
+
     # Test retraining execution
     result = retrain_model(trigger_reason="pytest_test", force=False, db_path=temp_db)
     assert "decision" in result
@@ -140,7 +145,11 @@ def test_retraining_and_rollback_flow(temp_db):
         assert history_after_rb[0]["decision"] == "ROLLED_BACK"
 
 
-def test_mlops_api_endpoints(admin_headers):
+def test_mlops_api_endpoints(admin_headers, tmp_path, monkeypatch):
+    # Synthetic dataset: the real feature table is git-ignored and absent in CI.
+    ds = tmp_path / "ds.csv"
+    _write_tiny_dataset(ds)
+    monkeypatch.setattr(model_retrainer, "DATASET_PATH", ds)
     client = TestClient(app)
 
     # 1. Test Drift Status Endpoint

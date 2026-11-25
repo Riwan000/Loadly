@@ -343,8 +343,12 @@ def test_file_names_are_built_only_from_validated_parts(tmp_path):
     assert local_filename(dt.date(2026, 11, 20), GOOD) == "20.11.26_NLDC_PSP_49523.xls"
     with pytest.raises(ValueError):
         local_filename(dt.date(2026, 11, 20), {**GOOD, "Id": "..\\..\\evil"})
-    with pytest.raises(ValueError):
-        safe_destination(tmp_path, "..\\evil.xls")
+    if os.name == "nt":
+        # Backslash is a path separator only on Windows; on POSIX it is a literal name character.
+        with pytest.raises(ValueError):
+            safe_destination(tmp_path, "..\\evil.xls")
+    else:
+        assert safe_destination(tmp_path, "..\\evil.xls").parent == tmp_path.resolve()
     with pytest.raises(ValueError):
         safe_destination(tmp_path, "../evil.xls")
     assert safe_destination(tmp_path, "a.xls") == (tmp_path / "a.xls").resolve()
